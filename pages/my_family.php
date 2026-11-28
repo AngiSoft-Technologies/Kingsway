@@ -88,4 +88,5 @@
     </div>
 </div>
 
+<?php asset_script($appBase, 'js/components/fee_ledger.js'); ?>
 <?php asset_script($appBase, 'js/pages/my_family.js'); ?>

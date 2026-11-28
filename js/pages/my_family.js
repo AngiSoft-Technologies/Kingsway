@@ -601,8 +601,10 @@ const MyFamilyController = {
                 (t.obligations || []).map((o) =>
                     '<tr><td>' + this.esc(o.fee_type_name || '') + '</td><td>KES ' + Number(o.amount_due || 0).toLocaleString() + '</td>' +
                     '<td>KES ' + Number(o.amount_paid || 0).toLocaleString() + '</td><td>KES ' + Number(o.balance || 0).toLocaleString() + '</td></tr>').join('') +
-                '</tbody></table>').join('')).join('');
-        const pmtRows = pmts.map((p) =>
+                '</tbody></table>').join('') +
+            (yr.ledger && window.FeeLedger ? window.FeeLedger.html(yr.ledger, { title: 'Account statement for ' + yr.year }) : '')).join('');
+        const hasLedger = fees.some((yr) => yr.ledger);
+        const pmtRows = hasLedger ? '' : pmts.map((p) =>
             '<tr><td>' + (p.payment_date || '').substring(0, 10) + '</td><td>' + this.esc(p.payment_method || '') + '</td>' +
             '<td>KES ' + Number(p.amount_paid || 0).toLocaleString() + '</td><td>' + this.esc(p.receipt_no || '') + '</td></tr>').join('');
         return '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fee Statement</title>' +

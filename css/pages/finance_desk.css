@@ -1,0 +1,112 @@
+/*
+ * Finance desk: budgets, department quotas and the financial dashboard, for
+ * the Director, School Administrator, Headteacher and Accountant. Scoped to
+ * .kw-fin. A quiet ledger page with one signature element: the quota bar,
+ * which shows a department's allocation as spent (solid), held for pending
+ * expenses (hatched) and left (empty), with any overspend running past the
+ * end in red.
+ *
+ * Uses the app's --kw-theme-* tokens so light and dark themes work.
+ */
+.kw-fin {
+  --fin-ink: var(--kw-theme-text, #1d2327);
+  --fin-muted: var(--kw-theme-muted, #5b6770);
+  --fin-line: var(--kw-theme-border, #dfe4e8);
+  --fin-surface: var(--kw-theme-surface, #ffffff);
+  --fin-accent: #0f5c4d;
+  --fin-spent: #0f5c4d;
+  --fin-held: #c48a1a;
+  --fin-over: #b3261e;
+  --fin-ok: #2e7d4f;
+  --fin-radius: 8px;
+  font-variant-numeric: tabular-nums;
+}
+html[data-kw-theme="dark"] .kw-fin { --fin-accent: #7fd1b9; --fin-spent: #7fd1b9; --fin-held: #f0b14a; --fin-over: #ff8a80; --fin-ok: #7ccf9c; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-kw-theme="light"]):not([data-kw-theme="dark"]) .kw-fin { --fin-accent: #7fd1b9; --fin-spent: #7fd1b9; --fin-held: #f0b14a; --fin-over: #ff8a80; --fin-ok: #7ccf9c; }
+}
+
+.kw-fin .fin-title { font-weight: 800; font-size: clamp(1.35rem, 1.1rem + 0.9vw, 1.75rem); letter-spacing: -0.01em; color: var(--fin-ink); margin: 0; }
+.kw-fin .fin-lede { color: var(--fin-muted); max-inline-size: 70ch; margin: 0.15rem 0 0; }
+.kw-fin .fin-panel { background: var(--fin-surface); border: 1px solid var(--fin-line); border-radius: var(--fin-radius); padding: 1rem; }
+.kw-fin .fin-panel h2, .kw-fin .fin-h { font-size: 1.05rem; font-weight: 700; color: var(--fin-ink); margin: 0 0 0.75rem; }
+.kw-fin .fin-panel h3 { font-size: 0.95rem; font-weight: 700; margin: 0 0 0.5rem; color: var(--fin-ink); }
+.kw-fin .table > thead > tr > th { color: var(--fin-muted); font-weight: 600; font-size: 0.8125rem; white-space: nowrap; }
+.kw-fin .num { text-align: end; white-space: nowrap; }
+.kw-fin .btn-fin {
+  --bs-btn-bg: var(--fin-accent); --bs-btn-border-color: var(--fin-accent); --bs-btn-color: #fff;
+  --bs-btn-hover-bg: color-mix(in oklab, var(--fin-accent) 85%, black); --bs-btn-hover-border-color: color-mix(in oklab, var(--fin-accent) 85%, black); --bs-btn-hover-color: #fff;
+  --bs-btn-disabled-bg: var(--fin-accent); --bs-btn-disabled-border-color: var(--fin-accent);
+  font-weight: 700;
+}
+html[data-kw-theme="dark"] .kw-fin .btn-fin { --bs-btn-color: #062019; --bs-btn-hover-color: #062019; }
+.kw-fin :is(.btn, .form-control, .form-select, a, [tabindex]):focus-visible { outline: 3px solid var(--fin-held); outline-offset: 2px; box-shadow: none; }
+
+/* KPI facts: value large, label small. */
+.kw-fin .fin-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr)); gap: 0.75rem; margin: 0; padding: 0; list-style: none; }
+.kw-fin .fin-facts > li { background: var(--fin-surface); border: 1px solid var(--fin-line); border-radius: var(--fin-radius); padding: 0.75rem 0.9rem; display: grid; gap: 0.15rem; }
+.kw-fin .fin-fact__l { color: var(--fin-muted); font-size: 0.8125rem; }
+.kw-fin .fin-fact__v { font-weight: 800; font-size: 1.3rem; color: var(--fin-ink); line-height: 1.15; }
+.kw-fin .fin-fact__s { color: var(--fin-muted); font-size: 0.8rem; }
+.kw-fin .fin-facts .is-warn .fin-fact__v { color: var(--fin-held); }
+.kw-fin .fin-facts .is-stop .fin-fact__v { color: var(--fin-over); }
+.kw-fin .fin-facts .is-ok .fin-fact__v { color: var(--fin-ok); }
+
+.kw-fin .fin-tag { display: inline-block; padding: 0.12em 0.55em; border-radius: 999px; border: 1px solid currentColor; font-size: 0.78rem; font-weight: 700; white-space: nowrap; }
+.kw-fin .fin-tag.is-draft, .kw-fin .fin-tag.is-closed { color: var(--fin-muted); }
+.kw-fin .fin-tag.is-submitted, .kw-fin .fin-tag.is-under_review, .kw-fin .fin-tag.is-pending { color: var(--fin-held); }
+.kw-fin .fin-tag.is-approved, .kw-fin .fin-tag.is-active { color: var(--fin-ok); }
+.kw-fin .fin-tag.is-rejected { color: var(--fin-over); }
+
+/* The quota bar. */
+.kw-fin .fin-quota { display: grid; gap: 0.3rem; min-inline-size: 12rem; }
+.kw-fin .fin-quota__bar { position: relative; display: flex; block-size: 0.75rem; border-radius: 3px; background: color-mix(in oklab, var(--fin-line) 65%, transparent); overflow: visible; }
+.kw-fin .fin-quota__spent { background: var(--fin-spent); border-radius: 3px 0 0 3px; }
+.kw-fin .fin-quota__held { background: repeating-linear-gradient(135deg, var(--fin-held) 0 4px, color-mix(in oklab, var(--fin-held) 40%, transparent) 4px 8px); }
+.kw-fin .fin-quota__over { position: absolute; inset-block: -2px; inset-inline-end: -0.6rem; inline-size: 0.6rem; background: var(--fin-over); border-radius: 0 3px 3px 0; }
+.kw-fin .fin-quota__text { display: flex; flex-wrap: wrap; gap: 0 0.9rem; font-size: 0.8125rem; color: var(--fin-muted); }
+.kw-fin .fin-quota__text strong { color: var(--fin-ink); }
+.kw-fin .fin-quota.is-over .fin-quota__text .left { color: var(--fin-over); font-weight: 700; }
+.kw-fin .fin-legend { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; font-size: 0.8125rem; color: var(--fin-muted); margin: 0 0 0.75rem; padding: 0; list-style: none; }
+.kw-fin .fin-legend i { display: inline-block; inline-size: 0.8rem; block-size: 0.8rem; border-radius: 2px; vertical-align: -0.1rem; margin-inline-end: 0.3rem; }
+.kw-fin .fin-legend .k-spent { background: var(--fin-spent); }
+.kw-fin .fin-legend .k-held { background: repeating-linear-gradient(135deg, var(--fin-held) 0 3px, transparent 3px 6px); border: 1px solid var(--fin-held); }
+.kw-fin .fin-legend .k-left { background: color-mix(in oklab, var(--fin-line) 65%, transparent); }
+.kw-fin .fin-legend .k-over { background: var(--fin-over); }
+
+/* Department rows. */
+.kw-fin .fin-depts { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.9rem; }
+.kw-fin .fin-depts > li { display: grid; grid-template-columns: minmax(9rem, 14rem) 1fr; gap: 0.25rem 1rem; align-items: center; }
+.kw-fin .fin-depts .fin-dept__name { font-weight: 700; color: var(--fin-ink); }
+.kw-fin .fin-depts .fin-dept__name small { display: block; font-weight: 400; color: var(--fin-muted); }
+
+/* The approval trail. */
+.kw-fin .fin-trail { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.25rem 1.25rem; font-size: 0.85rem; color: var(--fin-muted); }
+.kw-fin .fin-trail strong { color: var(--fin-ink); }
+
+/* Line editor. */
+.kw-fin .fin-lines-edit td { vertical-align: middle; }
+.kw-fin .fin-lines-edit .form-control, .kw-fin .fin-lines-edit .form-select { min-inline-size: 8rem; }
+
+/* Dashboard charts. */
+.kw-fin .fin-chart { position: relative; block-size: 260px; }
+.kw-fin .fin-chart--tall { block-size: 320px; }
+.kw-fin .fin-grid { display: grid; gap: 1rem; grid-template-columns: repeat(12, minmax(0, 1fr)); }
+.kw-fin .fin-grid > .span-12 { grid-column: span 12; }
+.kw-fin .fin-grid > .span-8 { grid-column: span 8; }
+.kw-fin .fin-grid > .span-6 { grid-column: span 6; }
+.kw-fin .fin-grid > .span-4 { grid-column: span 4; }
+@media (width < 992px) { .kw-fin .fin-grid > [class*="span-"] { grid-column: span 12; } }
+@media (width < 576px) { .kw-fin .fin-depts > li { grid-template-columns: 1fr; } }
+
+@media (forced-colors: active) {
+  .kw-fin .fin-quota__spent { background: Highlight; }
+  .kw-fin .fin-quota__held { background: GrayText; }
+  .kw-fin .fin-quota__over { background: Mark; }
+}
+@media print {
+  .kw-fin .d-print-none { display: none !important; }
+  .kw-fin .fin-panel { border: 0; padding: 0; break-inside: avoid; }
+  .kw-fin .fin-quota__bar { border: 1px solid #000; }
+  .kw-fin .fin-chart { block-size: 220px; }
+}

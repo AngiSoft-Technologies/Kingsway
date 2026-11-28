@@ -246,8 +246,10 @@ return [
             'url' => null,
             'icon' => 'fas fa-coins',
             'subitems' => [
+                ['label' => 'Financial Dashboard', 'url' => 'financial_dashboard'],
                 ['label' => 'Financial Reports', 'url' => 'finance_reports'],
-                ['label' => 'Budget Overview', 'url' => 'budget_overview'],
+                ['label' => 'Budgets', 'url' => 'budget_overview'],
+                ['label' => 'Budget vs Actuals', 'url' => 'budget_actuals'],
                 ['label' => 'Fee Structure', 'url' => 'manage_fee_structure'],       // approve what accountant drafted
                 ['label' => 'Extra Charges', 'url' => 'manage_extra_charges'],
                 ['label' => 'Student Fees Overview', 'url' => 'student_fees'],
@@ -537,6 +539,9 @@ return [
             'subitems' => [
                 ['label' => 'Fee Structure', 'url' => 'manage_fee_structure'],       // review (not draft — that's accountant)
                 ['label' => 'Finance Approvals', 'url' => 'finance_approvals'],       // authorize expenses, budgets and payroll
+                ['label' => 'Financial Dashboard', 'url' => 'financial_dashboard'],
+                ['label' => 'Budgets', 'url' => 'budget_overview'],                   // review, approve, make active; department quotas
+                ['label' => 'Budget vs Actuals', 'url' => 'budget_actuals'],
                 ['label' => 'Extra Charges', 'url' => 'manage_extra_charges'],
                 ['label' => 'Transport Fees', 'url' => 'transport_fees'],
                 ['label' => 'Student Fee Accounts', 'url' => 'student_fees'],
@@ -908,7 +913,8 @@ return [
             'subitems' => [
                 ['label' => 'Fee Structure Review', 'url' => 'manage_fee_structure'],       // REVIEW before Director approves
                 ['label' => 'Financial Reports', 'url' => 'finance_reports'],
-                ['label' => 'Budget Overview', 'url' => 'budget_overview'],
+                ['label' => 'Budgets', 'url' => 'budget_overview'],                   // prepare the budget
+                ['label' => 'Budget vs Actuals', 'url' => 'budget_actuals'],
             ]
         ],
 
@@ -1692,7 +1698,8 @@ return [
             'url' => null,
             'icon' => 'fas fa-chart-line',
             'subitems' => [
-                ['label' => 'Budget Overview', 'url' => 'budget_overview'],
+                ['label' => 'Financial Dashboard', 'url' => 'financial_dashboard'],
+                ['label' => 'Budgets', 'url' => 'budget_overview'],
                 ['label' => 'Budget vs Actuals', 'url' => 'budget_actuals'],
             ]
         ],

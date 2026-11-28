@@ -211,6 +211,28 @@
                     </tbody>
                 </table>
 
+                <!-- Account statement: every entry that moved the balance -->
+                <div class="d-flex flex-wrap justify-content-between align-items-baseline gap-2 mb-2">
+                    <h6 class="mb-0">Account statement</h6>
+                    <small class="text-muted">Fees, balances brought forward, waivers, scholarships and sponsorships, credit notes and payments, with who recorded each</small>
+                </div>
+                <div id="ledgerWarning" class="alert alert-warning py-2 small d-none" role="status"></div>
+                <div class="table-responsive mb-4">
+                <table class="table table-sm table-bordered align-middle mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th scope="col">Date</th>
+                            <th scope="col">Details</th>
+                            <th scope="col">Recorded or approved by</th>
+                            <th scope="col" class="text-end">Charged (KES)</th>
+                            <th scope="col" class="text-end">Credited (KES)</th>
+                            <th scope="col" class="text-end">Balance (KES)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ledgerBody"></tbody>
+                </table>
+                </div>
+
                 <!-- Payment History -->
                 <h6 class="mb-2">Payment History</h6>
                 <table class="table table-sm table-bordered">

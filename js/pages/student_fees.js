@@ -901,6 +901,8 @@ const StudentFeesController = {
         })
         .join("");
 
+      this.renderLedger(payload?.ledger, summary);
+
       this.ui.paymentHistoryBody.innerHTML =
         payments
           .map((payment) => {
@@ -921,6 +923,33 @@ const StudentFeesController = {
       modal.show();
     } catch (error) {
       console.error("Failed to load fee statement:", error);
+    }
+  },
+
+  /** The account statement: every entry that moved the balance, with a running balance. */
+  renderLedger: function (ledger, summary) {
+    const body = document.getElementById("ledgerBody");
+    const warn = document.getElementById("ledgerWarning");
+    if (!body) return;
+    const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    const money = (v) => (Number(v) ? this.formatCurrency(v) : "");
+    const entries = ledger?.entries || [];
+    body.innerHTML = entries.length ? entries.map((e) => `
+        <tr>
+          <td class="text-nowrap">${esc(this.formatDate(e.date))}</td>
+          <td><div class="fw-semibold">${esc(e.description)}${e.term ? ` <span class="text-muted fw-normal">(${esc(e.term)})</span>` : ""}</div>${e.detail ? `<div class="small text-muted">${esc(e.detail)}</div>` : ""}</td>
+          <td>${esc(e.by || "")}</td>
+          <td class="text-end">${money(e.debit)}</td>
+          <td class="text-end">${money(e.credit)}</td>
+          <td class="text-end fw-semibold">${e.balance < 0 ? `${this.formatCurrency(-e.balance)} in credit` : this.formatCurrency(e.balance)}</td>
+        </tr>`).join("") + `
+        <tr class="table-light fw-bold"><td colspan="3">Closing balance</td><td class="text-end">${this.formatCurrency(ledger.total_debit)}</td><td class="text-end">${this.formatCurrency(ledger.total_credit)}</td>
+          <td class="text-end">${ledger.closing_balance < 0 ? `${this.formatCurrency(-ledger.closing_balance)} in credit` : this.formatCurrency(ledger.closing_balance)}</td></tr>`
+      : '<tr><td colspan="6" class="text-muted text-center">Nothing has been billed or received for this year.</td></tr>';
+    if (warn) {
+      const off = ledger && !ledger.matches_recorded_balance;
+      warn.classList.toggle("d-none", !off);
+      warn.textContent = off ? `These entries add up to ${this.formatCurrency(ledger.closing_balance)}, but the recorded balance is ${this.formatCurrency(summary?.closing_balance ?? summary?.balance ?? 0)}. Check this learner's account before sharing the statement.` : "";
     }
   },
 

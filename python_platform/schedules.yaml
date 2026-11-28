@@ -811,7 +811,8 @@ jobs:
   # PHP checks PAYMENT_SWEEP_WORKER_SECRET, falling back to COMMUNICATION_WORKER_SECRET.
   secret_env: [PAYMENT_SWEEP_WORKER_SECRET, COMMUNICATION_WORKER_SECRET]
   payload:
-    limit: 25
+    # At most 10 checks a run, spaced out, each prompt backed off (PHP caps it too).
+    limit: 10
     stall_minutes: 30
   interval: 60
 - name: sms_contact_sync
