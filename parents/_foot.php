@@ -227,6 +227,7 @@ if ($parentRealtimeBase !== '') {
 ?>
 <?php asset_script($appBase, 'js/core/parent_common.js'); ?>
 <?php asset_script($appBase, 'js/components/learner_record.js'); ?>
+<?php asset_script($appBase, 'js/components/fee_ledger.js'); ?>
 <?php asset_script($appBase, 'js/pages/' . ltrim($parentPageScript, '/') . '.js'); ?>
 <script nonce="<?= csp_nonce() ?>">
   window.AppLogger?.init?.();

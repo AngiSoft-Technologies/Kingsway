@@ -121,12 +121,18 @@ class DepartmentBudgetManager
     }
 
     // Approve/reject fund request
-    public function updateFundRequestStatus($requestId, $status, $reviewedBy)
+    public function updateFundRequestStatus($requestId, $status, $reviewedBy, array $roleIds = [])
     {
-        $sql = "UPDATE budget_amendments SET status = ?, approved_by = ?, approved_at = NOW() WHERE id = ?";
-        $stmt = $this->db->prepare($sql);
-        $stmt->execute([$status, $reviewedBy, $requestId]);
-        return $stmt->rowCount();
+        // Decided through the budget service, so an approval actually adds the
+        // money to the line and the budget (before, approving changed nothing).
+        $decision = strtolower((string) $status);
+        if (!in_array($decision, ['approved', 'rejected'], true)) {
+            throw new \RuntimeException('Status must be approved or rejected.');
+        }
+        (new \App\API\Services\BudgetService($this->db))->decideFunds(
+            (int) $requestId, $decision === 'approved', $decision === 'rejected' ? 'Declined' : null, (int) $reviewedBy, $roleIds
+        );
+        return 1;
     }
 
     private function mapProposalStatus($status)

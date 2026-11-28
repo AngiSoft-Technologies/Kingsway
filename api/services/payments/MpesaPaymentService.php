@@ -1212,14 +1212,22 @@ class MpesaPaymentService
         $summary = ['checked' => 0, 'resolved' => 0, 'failed' => 0, 'still_pending' => 0, 'errors' => 0];
 
         try {
+            // Back off per prompt (5, 10, 20 ... minutes, at most 6 hours apart),
+            // stop after 12 unclear answers, and check at most 10 per run, so
+            // the sweep never trips Daraja's rate limit by re-asking every minute.
+            $maxAttempts = max(1, min(10, $maxAttempts));
             $stmt = $this->getDb()->prepare(
-                "SELECT id, checkout_request_id
+                "SELECT id, checkout_request_id, sweep_attempts
                    FROM mpesa_transactions
                   WHERE status = 'pending'
                     AND checkout_request_id IS NOT NULL
                     AND checkout_request_id <> ''
+                    AND matching_status <> 'needs_review'
+                    AND sweep_attempts < 12
                     AND created_at < DATE_SUB(NOW(), INTERVAL ? MINUTE)
-                  ORDER BY created_at ASC
+                    AND (last_swept_at IS NULL
+                         OR last_swept_at < DATE_SUB(NOW(), INTERVAL LEAST(5 * POW(2, sweep_attempts), 360) MINUTE))
+                  ORDER BY last_swept_at IS NOT NULL, last_swept_at ASC, created_at ASC
                   LIMIT ?"
             );
             $stmt->execute([$stallMinutes, $maxAttempts]);
@@ -1230,15 +1238,28 @@ class MpesaPaymentService
             return $summary;
         }
 
-        foreach ($rows as $row) {
+        $mark = $this->getDb()->prepare('UPDATE mpesa_transactions SET sweep_attempts = sweep_attempts + 1, last_swept_at = NOW() WHERE id = ?');
+        foreach ($rows as $i => $row) {
             $checkoutId = (string) ($row['checkout_request_id'] ?? '');
             if ($checkoutId === '') {
                 continue;
             }
+            if ($i > 0) {
+                usleep(2500000); // stay under the provider's burst limit (3 at once, 30 a minute)
+            }
             $summary['checked']++;
 
             try {
+                $mark->execute([(int) $row['id']]);
                 $result = $this->queryTransactionStatus($checkoutId);
+                $raw = json_encode($result['data'] ?? $result);
+                if (is_string($raw) && stripos($raw, 'ratelimit') !== false) {
+                    // The provider asked us to slow down: stop this run; the
+                    // prompt is checked again after its backoff.
+                    $summary['still_pending']++;
+                    $summary['rate_limited'] = true;
+                    break;
+                }
                 $outcome = self::describeStkOutcome((array) ($result['data'] ?? []));
 
                 if ($outcome['outcome'] === 'paid') {
@@ -1256,8 +1277,14 @@ class MpesaPaymentService
 
                 // Ambiguous: the provider could not be reached, or returned a
                 // code that does not decide the payment. Leave it pending rather
-                // than guessing that money was not received.
+                // than guessing that money was not received; after 12 unclear
+                // checks a person looks at it instead of the sweep.
                 $summary['still_pending']++;
+                if ((int) $row['sweep_attempts'] + 1 >= 12) {
+                    $this->getDb()->prepare("UPDATE mpesa_transactions SET matching_status = 'needs_review' WHERE id = ? AND status = 'pending'")
+                        ->execute([(int) $row['id']]);
+                    $summary['needs_review'] = ($summary['needs_review'] ?? 0) + 1;
+                }
             } catch (Exception $e) {
                 $summary['errors']++;
                 \App\API\Services\Logger::legacyError('[MpesaPaymentService] STK sweep row ' . $row['id'] . ': ' . $e->getMessage());

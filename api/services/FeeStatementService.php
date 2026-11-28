@@ -153,7 +153,7 @@ class FeeStatementService
         // Extra charges (stored apart from tuition; no read projection).
         $extras = $this->rows(
             "SELECT eco.student_academic_enrollment_id AS eid, eco.academic_year_term_id AS tid,
-                    ec.name AS item, SUM(eco.amount_due) AS amount
+                    ec.name AS item, SUM(eco.amount_due) AS amount, SUM(COALESCE(eco.amount_waived, 0)) AS waived
              FROM extra_charge_student_obligations eco
              JOIN extra_charge_schedules ecs ON ecs.id = eco.schedule_id
              JOIN " . ReadReplicaService::qualifiedRef('extra_charges') . " ec ON ec.id = ecs.extra_charge_id
@@ -189,7 +189,7 @@ class FeeStatementService
         // Payments credited to this year: same rule as the fee view.
         $payments = [];
         foreach ($this->rows(
-            "SELECT p.student_id, p.payment_date, p.method, p.amount, p.receipt_no, p.reference
+            "SELECT p.id, p.student_id, p.payment_date, p.method, p.amount, p.receipt_no, p.reference
              FROM " . ReadReplicaService::qualifiedRef('payments') . " p
              WHERE p.student_id IN ({$studentIn})
                AND p.status IN ('confirmed','completed','success')
@@ -211,6 +211,26 @@ class FeeStatementService
             $advances[(int) $row['student_id']] = (float) $row['advance'];
         }
 
+        $ledgerData = $this->ledgerSources($in, $studentIn, $yearId);
+
+        // Who received each payment and who paid it (primary, keyed by id).
+        $paymentIds = [];
+        foreach ($payments as $list) foreach ($list as $p) $paymentIds[] = (int) $p['id'];
+        if ($paymentIds) {
+            $who = [];
+            foreach ($this->rows('SELECT id, received_by, payer_name FROM payments WHERE id IN (' . implode(',', $paymentIds) . ')') as $w) {
+                $who[(int) $w['id']] = $w;
+            }
+            foreach ($payments as &$list) {
+                foreach ($list as &$p) {
+                    $p['received_by'] = $who[(int) $p['id']]['received_by'] ?? null;
+                    $p['payer_name'] = $who[(int) $p['id']]['payer_name'] ?? null;
+                }
+                unset($p);
+            }
+            unset($list);
+        }
+
         $items = [];
         foreach (array_merge($tuition, $extras) as $row) {
             $items[(int) $row['eid']][(int) $row['tid']][] = $row;
@@ -230,7 +250,8 @@ class FeeStatementService
                 $creditsBy[$eid] ?? [],
                 $rollovers[$sid] ?? null,
                 $payments[$sid] ?? [],
-                $advances[$sid] ?? 0.0
+                $advances[$sid] ?? 0.0,
+                $ledgerData
             );
         }
         return $statements;
@@ -238,7 +259,7 @@ class FeeStatementService
 
     private function statement(
         array $year, array $learner, array $terms, array $balances, array $items,
-        array $credits, ?array $rollover, array $payments, float $advance
+        array $credits, ?array $rollover, array $payments, float $advance, array $ledgerData = []
     ): array {
         $termRows = [];
         $sum = ['opening_arrears' => 0.0, 'fees' => 0.0, 'waived' => 0.0, 'credit_bf' => 0.0, 'credit_other' => 0.0,
@@ -342,6 +363,7 @@ class FeeStatementService
                 'allocated_to_fees' => round($sum['paid'], 2),
             ],
             'summary' => $summary,
+            'ledger' => $this->ledger($year, $learner, $terms, $termRows, $items, $rollover, $payments, $ledgerData, $closing),
             'reconciliation' => [
                 'recorded_balance' => $closing,
                 'computed_balance' => $computed,
@@ -350,6 +372,277 @@ class FeeStatementService
                 'ok' => abs($closing - $computed) < 0.01 && abs($sum['items_difference']) < 0.01,
             ],
         ];
+    }
+
+    // ------------------------------------------------------------------
+    // The ledger: every entry that moved the balance, dated, with who.
+    // ------------------------------------------------------------------
+
+    /** @var array<int,string> users.id => name */
+    private array $names = [];
+
+    /**
+     * What the ledger needs beyond the totals, for all learners at once:
+     * the bills, waivers, fee relief, credit notes applied and the figures
+     * recorded when a learner joined. Simple keyed reads, joined in PHP.
+     */
+    private function ledgerSources(string $enrollmentIn, string $studentIn, int $yearId): array
+    {
+        $bills = $this->rows(
+            "SELECT id, student_academic_enrollment_id AS eid, academic_year_term_id AS tid
+               FROM student_fee_obligations WHERE student_academic_enrollment_id IN ({$enrollmentIn})"
+        );
+        $billIn = implode(',', array_map(static fn ($b) => (int) $b['id'], $bills) ?: [0]);
+        $bill = [];
+        foreach ($bills as $b) $bill[(int) $b['id']] = ['eid' => (int) $b['eid'], 'tid' => (int) $b['tid']];
+
+        $byEid = static function (array $rows, string $key) use ($bill): array {
+            $out = [];
+            foreach ($rows as $r) {
+                $b = $bill[(int) $r[$key]] ?? null;
+                if (!$b) continue;
+                $r['tid'] = $b['tid'];
+                $out[$b['eid']][] = $r;
+            }
+            return $out;
+        };
+
+        $waivers = $this->rows(
+            "SELECT id, student_fee_obligation_id, discount_type, discount_value, discount_percentage, reason, approved_by, approved_date
+               FROM fee_discounts_waivers WHERE student_fee_obligation_id IN ({$billIn}) AND status = 'active'"
+        );
+        $relief = $this->rows(
+            "SELECT id, student_fee_obligation_id, source, source_id, description, reason, amount, granted_by, granted_at
+               FROM student_fee_relief_entries WHERE student_fee_obligation_id IN ({$billIn}) AND status = 'active'"
+        );
+        $apps = $this->rows(
+            "SELECT id, fee_credit_note_id, student_fee_obligation_id, applied_amount, applied_by, applied_at
+               FROM fee_credit_applications WHERE student_fee_obligation_id IN ({$billIn})"
+        );
+        $noteIn = implode(',', array_unique(array_map(static fn ($a) => (int) $a['fee_credit_note_id'], $apps)) ?: [0]);
+        $notes = [];
+        foreach ($this->rows("SELECT id, credit_number, credit_reason, notes, created_by, created_at FROM fee_credit_notes WHERE id IN ({$noteIn})") as $n) {
+            $notes[(int) $n['id']] = $n;
+        }
+        $snapshots = [];
+        foreach ($this->rows(
+            "SELECT student_id, academic_year_paid_amount, arrears_amount, advance_amount, reference, payment_date,
+                    payment_method, receipt_no, notes, imported_by, created_at
+               FROM student_fee_migration_snapshots WHERE academic_year_id = ? AND student_id IN ({$studentIn})",
+            [$yearId]
+        ) as $snap) {
+            $snapshots[(int) $snap['student_id']] = $snap;
+        }
+
+        $this->prefetchNames(array_merge(
+            array_column($waivers, 'approved_by'), array_column($relief, 'granted_by'),
+            array_column($apps, 'applied_by'), array_column($snapshots, 'imported_by')
+        ));
+
+        return [
+            'waivers' => $byEid($waivers, 'student_fee_obligation_id'),
+            'relief' => $byEid($relief, 'student_fee_obligation_id'),
+            'credits' => $byEid($apps, 'student_fee_obligation_id'),
+            'notes' => $notes,
+            'snapshots' => $snapshots,
+        ];
+    }
+
+    private function ledger(array $year, array $learner, array $terms, array $termRows, array $items,
+                            ?array $rollover, array $payments, array $src, float $recordedClosing): array
+    {
+        $eid = (int) $learner['eid'];
+        $sid = (int) $learner['student_id'];
+        $opening = [];
+        foreach ($terms as $t) $opening[(int) $t['id']] = substr((string) $t['opening_date'], 0, 10);
+        $first = $opening ? min($opening) : date('Y-m-d');
+        $termName = array_column($terms, 'term_name', 'id');
+        $this->prefetchNames(array_column($payments, 'received_by'));
+
+        $entries = [];
+        $seq = 0;
+        $add = function (?string $date, int $order, string $kind, string $what, ?string $detail, $by, float $debit, float $credit, ?int $tid) use (&$entries, &$seq, $first, $termName) {
+            $debit = round($debit, 2);
+            $credit = round($credit, 2);
+            if ($debit == 0.0 && $credit == 0.0) return;
+            if ($debit < 0) { $credit -= $debit; $debit = 0.0; }
+            if ($credit < 0) { $debit -= $credit; $credit = 0.0; }
+            $entries[] = [
+                'date' => substr((string) ($date ?: $first), 0, 10),
+                'order' => $order, 'seq' => $seq++,
+                'kind' => $kind,
+                'description' => $what,
+                'detail' => $detail !== null && trim($detail) !== '' ? trim($detail) : null,
+                'term' => $tid ? ($termName[$tid] ?? null) : null,
+                'by' => is_int($by) || ctype_digit((string) $by) ? ($by ? $this->nameOf((int) $by) : null) : $by,
+                'debit' => round($debit, 2),
+                'credit' => round($credit, 2),
+            ];
+        };
+        $termRow = [];
+        foreach ($termRows as $r) $termRow[(int) $r['term_id']] = $r;
+
+        // 1. Brought forward: arrears from last year, then what was owed on joining.
+        $snap = $src['snapshots'][$sid] ?? null;
+        $arrears = round(array_sum(array_column($termRows, 'arrears_brought_forward')), 2);
+        $fromRollover = round(min($arrears, (float) ($rollover['arrears_carried'] ?? 0)), 2);
+        if ($fromRollover > 0) {
+            $add($first, 0, 'brought_forward', 'Balance brought forward from ' . ($rollover['from_year'] ?? 'the previous year'), null, null, $fromRollover, 0, null);
+        }
+        if ($arrears - $fromRollover > 0.004) {
+            $add($first, 0, 'brought_forward', 'Balance owed when the learner joined the system',
+                $snap ? $this->snapDetail($snap) : null, $snap['imported_by'] ?? null, $arrears - $fromRollover, 0, null);
+        }
+
+        // 2. Fees billed, per term and item (tuition and extra charges).
+        foreach ($termRows as $r) {
+            $tid = (int) $r['term_id'];
+            $listed = 0.0;
+            foreach ($r['items'] as $it) {
+                $add($opening[$tid] ?? null, 1, 'fee', $it['item'], null, null, (float) $it['amount'], 0, $tid);
+                $listed += (float) $it['amount'];
+            }
+            $add($opening[$tid] ?? null, 1, 'fee', 'Other fees for the term', 'Fees recorded without an item name', null, (float) $r['fees_billed'] - $listed, 0, $tid);
+        }
+
+        // 3. Waivers, scholarships and sponsorships, admission relief, extra charges waived.
+        $waivedByTerm = [];
+        foreach ($src['waivers'][$eid] ?? [] as $w) {
+            $type = (string) $w['discount_type'];
+            $label = ['percentage' => 'Fee waiver (' . rtrim(rtrim(number_format((float) $w['discount_percentage'], 2), '0'), '.') . '%)',
+                      'fixed_amount' => 'Fee waiver', 'full_waiver' => 'Full fee waiver', 'merit' => 'Merit discount',
+                      'need_based' => 'Needs-based fee waiver', 'sibling' => 'Sibling discount'][$type] ?? 'Fee waiver';
+            $add($w['approved_date'], 2, 'waiver', $label, $w['reason'], $w['approved_by'], 0, (float) $w['discount_value'], (int) $w['tid']);
+            $waivedByTerm[(int) $w['tid']] = ($waivedByTerm[(int) $w['tid']] ?? 0) + (float) $w['discount_value'];
+        }
+        foreach ($src['relief'][$eid] ?? [] as $rel) {
+            $what = $rel['source'] === 'scholarship' ? 'Scholarship / sponsorship: ' . $rel['description'] : $rel['description'];
+            $add($rel['granted_at'] ?: ($opening[(int) $rel['tid']] ?? null), 2, $rel['source'] === 'scholarship' ? 'scholarship' : ($rel['source'] === 'admission_relief' ? 'admission_relief' : 'relief'),
+                $what, $rel['reason'], $rel['granted_by'], 0, (float) $rel['amount'], (int) $rel['tid']);
+            $waivedByTerm[(int) $rel['tid']] = ($waivedByTerm[(int) $rel['tid']] ?? 0) + (float) $rel['amount'];
+        }
+        foreach ($items as $tid => $rows) {
+            foreach ($rows as $it) {
+                if ((float) ($it['waived'] ?? 0) > 0) {
+                    $add($opening[(int) $tid] ?? null, 2, 'waiver', 'Waived: ' . $it['item'], null, null, 0, (float) $it['waived'], (int) $tid);
+                    $waivedByTerm[(int) $tid] = ($waivedByTerm[(int) $tid] ?? 0) + (float) $it['waived'];
+                }
+            }
+        }
+        foreach ($termRow as $tid => $r) {
+            $diff = round((float) $r['waived'] - ($waivedByTerm[$tid] ?? 0), 2);
+            if ($diff > 0) {
+                $add($opening[$tid] ?? null, 2, 'relief', 'Fee relief (details not recorded)', 'Recorded on the bill before relief was itemised', null, 0, $diff, $tid);
+            } elseif ($diff < 0) {
+                $add($opening[$tid] ?? null, 2, 'adjustment', 'Relief above the fee due (not used)', 'Relief cannot take a term below zero', null, -$diff, 0, $tid);
+            }
+        }
+
+        // 4. Credit notes applied: overpayments brought forward, and others.
+        $creditByTerm = [];
+        foreach ($src['credits'][$eid] ?? [] as $a) {
+            $n = $src['notes'][(int) $a['fee_credit_note_id']] ?? [];
+            $number = (string) ($n['credit_number'] ?? '');
+            $amt = (float) $a['applied_amount'];
+            if (str_starts_with($number, 'ROL-')) {
+                $add($first, 0, 'credit_brought_forward', 'Overpayment brought forward from ' . ($rollover['from_year'] ?? 'the previous year'),
+                    'Credit note ' . $number, $a['applied_by'], 0, $amt, (int) $a['tid']);
+            } else {
+                $reason = ['overpayment' => 'overpayment', 'fee_reduction' => 'fee reduction', 'sponsorship_adjustment' => 'sponsorship adjustment',
+                           'error_correction' => 'correction', 'waiver_excess' => 'waiver above the fee', 'refund' => 'refund'][$n['credit_reason'] ?? ''] ?? 'credit';
+                $add($a['applied_at'], 3, 'credit_note', 'Credit note ' . $number . ' (' . $reason . ')', $n['notes'] ?? null, $a['applied_by'], 0, $amt, (int) $a['tid']);
+            }
+            $creditByTerm[(int) $a['tid']] = ($creditByTerm[(int) $a['tid']] ?? 0) + $amt;
+        }
+        foreach ($termRow as $tid => $r) {
+            $diff = round((float) $r['credit_brought_forward'] + (float) $r['credit_notes'] - ($creditByTerm[$tid] ?? 0), 2);
+            $add($opening[$tid] ?? null, 3, 'adjustment', 'Credit adjustment', null, null, $diff < 0 ? -$diff : 0, $diff > 0 ? $diff : 0, $tid);
+        }
+
+        // 5. Money received: what was paid before joining, then every payment.
+        $before = 0.0;
+        foreach ($items as $rows) foreach ($rows as $it) $before += (float) ($it['migration_paid'] ?? 0);
+        $before += (float) ($snap['advance_amount'] ?? 0);
+        if ($before > 0) {
+            $add($snap['payment_date'] ?? ($snap ? substr((string) $snap['created_at'], 0, 10) : null), 4, 'paid_before_joining',
+                'Fees paid before the learner joined the system', $snap ? $this->snapDetail($snap) : 'Recorded when the school started using the system',
+                $snap['imported_by'] ?? null, 0, $before, null);
+        }
+        foreach ($payments as $p) {
+            if ((string) $p['method'] === 'internal_transfer') {
+                // A misdirected payment moved between learners or to transport.
+                $out = (float) $p['amount'] < 0;
+                $add($p['payment_date'], 4, 'payment_moved', $out ? 'Payment moved to another account' : 'Payment moved in from another account',
+                    $p['reference'] ? 'Original receipt ' . $p['reference'] : null, $p['received_by'] ?? null, 0, (float) $p['amount'], null);
+                continue;
+            }
+            $method = $this->methodLabel((string) $p['method']);
+            $detail = implode(', ', array_filter([
+                $p['receipt_no'] ? 'Receipt ' . $p['receipt_no'] : null,
+                $p['reference'] ? 'Ref ' . $p['reference'] : null,
+                !empty($p['payer_name']) ? 'Paid by ' . $p['payer_name'] : null,
+            ]));
+            $add($p['payment_date'], 4, 'payment', 'Payment, ' . $method, $detail, $p['received_by'] ?? null, 0, (float) $p['amount'], null);
+        }
+
+        usort($entries, static fn ($a, $b) => [$a['date'], $a['order'], $a['seq']] <=> [$b['date'], $b['order'], $b['seq']]);
+        $running = 0.0;
+        foreach ($entries as &$e) {
+            $running = round($running + $e['debit'] - $e['credit'], 2);
+            $e['balance'] = $running;
+            unset($e['order'], $e['seq']);
+        }
+        unset($e);
+
+        return [
+            'entries' => $entries,
+            'total_debit' => round(array_sum(array_column($entries, 'debit')), 2),
+            'total_credit' => round(array_sum(array_column($entries, 'credit')), 2),
+            'closing_balance' => $running,
+            'matches_recorded_balance' => abs($running - $recordedClosing) < 0.01,
+        ];
+    }
+
+    private function snapDetail(array $snap): string
+    {
+        return implode(', ', array_filter([
+            $snap['payment_method'] ? $this->methodLabel((string) $snap['payment_method']) : null,
+            $snap['receipt_no'] ? 'Receipt ' . $snap['receipt_no'] : null,
+            $snap['reference'] ? 'Ref ' . $snap['reference'] : null,
+            $snap['notes'] ?: null,
+            'Entered ' . substr((string) $snap['created_at'], 0, 10),
+        ]));
+    }
+
+    private function methodLabel(string $m): string
+    {
+        $m = strtolower(trim($m));
+        return ['mpesa' => 'M-Pesa', 'm-pesa' => 'M-Pesa', 'm_pesa' => 'M-Pesa', 'bank' => 'bank', 'bank_transfer' => 'bank transfer',
+                'cash' => 'cash', 'cheque' => 'cheque', 'card' => 'card', 'kcb' => 'KCB', 'other' => 'other'][$m]
+            ?? ($m !== '' ? str_replace('_', ' ', $m) : 'method not recorded');
+    }
+
+    /** Staff names for user ids: users -> persons, two keyed reads. */
+    private function prefetchNames(array $userIds): void
+    {
+        $ids = array_values(array_diff(array_unique(array_filter(array_map('intval', $userIds))), array_keys($this->names)));
+        if (!$ids) return;
+        $users = $this->rows('SELECT id, person_id FROM users WHERE id IN (' . implode(',', $ids) . ')');
+        $pids = array_values(array_unique(array_filter(array_map(static fn ($u) => (int) $u['person_id'], $users))));
+        $persons = [];
+        if ($pids) {
+            foreach ($this->rows('SELECT id, first_name, last_name FROM persons WHERE id IN (' . implode(',', $pids) . ')') as $p) {
+                $persons[(int) $p['id']] = trim($p['first_name'] . ' ' . $p['last_name']);
+            }
+        }
+        foreach ($ids as $id) $this->names[$id] = '';
+        foreach ($users as $u) $this->names[(int) $u['id']] = $persons[(int) $u['person_id']] ?? '';
+    }
+
+    private function nameOf(int $userId): ?string
+    {
+        if (!array_key_exists($userId, $this->names)) $this->prefetchNames([$userId]);
+        return ($this->names[$userId] ?? '') !== '' ? $this->names[$userId] : null;
     }
 
     private function status(array $row): string

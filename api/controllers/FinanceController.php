@@ -605,6 +605,13 @@ class FinanceController extends BaseController
         return $this->success(($this->contract('App\API\Services\payments\StudentFundTransferService', Database::getInstance()->getConnection()))->sources());
     }
 
+    /** GET /api/finance/student-fund-payments?q=receipt|M-Pesa code|reference — a payment to move, with what is left of it. */
+    public function getStudentFundPayments($id = null, $data = [], $segments = [])
+    {
+        if (!$this->userHasAny(['finance.view', 'finance_view'], [3, 4, 10])) return $this->forbidden('Insufficient permissions');
+        return $this->success(['payments' => ($this->contract('App\API\Services\payments\StudentFundTransferService', Database::getInstance()->getConnection()))->findPayments((string) ($_GET['q'] ?? ''))]);
+    }
+
     /** GET /api/finance/student-fund-destinations */
     public function getStudentFundDestinations($id = null, $data = [], $segments = [])
     {
@@ -892,7 +899,9 @@ class FinanceController extends BaseController
     /** PUT /api/finance/student-fund-transfers/{id} */
     public function putStudentFundTransfers($id = null, $data = [], $segments = [])
     {
-        if (!$this->userHasAny(['finance.approve', 'finance_approve'], [3, 4, 10])) return $this->forbidden('Only authorized finance approvers may decide fund transfers');
+        // Moving money between learners is approved by the School Administrator
+        // or Director; the Accountant prepares it and posts it once approved.
+        if ($denied = $this->requireApprovalAccess('approve moving money between learners')) return $denied;
         if (!$id) return $this->badRequest('Transfer ID is required');
         try { return $this->success(($this->contract('App\API\Services\payments\StudentFundTransferService', Database::getInstance()->getConnection()))->decide((int)$id, strtolower((string)($data['decision'] ?? $data['status'] ?? '')), (int)$this->getUserId()), 'Transfer decision recorded'); }
         catch (\Throwable $e) { return $this->badRequest($e->getMessage()); }
@@ -1090,6 +1099,7 @@ class FinanceController extends BaseController
      */
     public function postDepartmentBudgetsAllocate($id = null, $data = [], $segments = [])
     {
+        if ($denied = $this->requireApprovalAccess('allocate department funds')) return $denied;
         // Expecting: $data['department_id'], $data['amount'], $data['allocated_by']
         $departmentId = $data['department_id'] ?? null;
         $amount = $data['amount'] ?? null;
@@ -2770,13 +2780,15 @@ return $this->error('An internal error occurred.');
             if ($data['status'] === 'approved') return $this->postExpensesApprove($id, $data, $segments);
             if ($data['status'] === 'rejected')  return $this->postExpensesReject($id, $data, $segments);
             if ($data['status'] === 'pending_approval') {
-                $this->crud->setExpenseStatus($id, 'pending_approval');
+                try { $this->crud->setExpenseStatus((int) $id, 'pending_approval'); }
+                catch (\RuntimeException $e) { return $this->badRequest($e->getMessage()); }
                 return $this->success(null, 'Expense submitted for approval');
             }
         }
 
         if (empty($data)) return $this->badRequest('Nothing to update');
-        $this->crud->updateExpense((int)$id, $data);
+        try { $this->crud->updateExpense((int)$id, $data); }
+        catch (\RuntimeException $e) { return $this->badRequest($e->getMessage()); }
         return $this->success(null, 'Expense updated');
     }
 
@@ -2944,12 +2956,105 @@ return $this->error('An internal error occurred.');
         if (!$id) return $this->badRequest('Budget ID required');
         $userId = $this->getUserId();
         $status = $data['status'] ?? null;
+        // Budget status moves only through the budget workflow (who may do
+        // what, in which order); a bare status write could approve anything.
+        $action = $status ? (['submitted' => 'submit', 'under_review' => 'review', 'approved' => 'approve', 'active' => 'activate', 'rejected' => 'return', 'closed' => 'close'][$status] ?? null) : null;
         if ($status) {
-            $this->crud->updateBudgetStatus((int)$id, $status, $userId);
-            return $this->success(null, 'Budget status updated to '.$status);
+            if (!$action) return $this->badRequest('Unknown budget status.');
+            return $this->budgets(fn ($b) => $b->act((int) $id, $action, $data['notes'] ?? null, (int) $userId, (array) $this->getUserRoleIds()));
         }
-        $this->crud->updateBudget((int)$id, $data);
-        return $this->success(null, 'Budget updated');
+        return $this->budgets(fn ($b) => $b->save(['id' => (int) $id] + (array) $data + ['lines' => []], (int) $userId), true);
+    }
+
+    // ========================================
+    // SECTION 15b: Budget workflow and department allocations (BudgetService)
+    // ========================================
+
+    private function budgets(callable $fn, bool $prepare = false)
+    {
+        if (!$this->user) return $this->unauthorized('Authentication required');
+        $roles = (array) $this->getUserRoleIds();
+        if (!\App\API\Services\BudgetService::can('view', $roles)) return $this->forbidden('Budgets are for the Director, School Administrator, Headteacher and Accountant.');
+        if ($prepare && !\App\API\Services\BudgetService::can('prepare', $roles)) return $this->forbidden('You cannot prepare budgets.');
+        try {
+            return $this->success($fn(new \App\API\Services\BudgetService($this->db->getConnection())));
+        } catch (\RuntimeException $e) {
+            $code = (int) $e->getCode();
+            return $this->respond(null, $e->getMessage(), in_array($code, [400, 403, 404, 409], true) ? $code : 400, false);
+        } catch (\Throwable $e) {
+            \App\API\Includes\FileLogger::write('finance', ['type' => 'budget_error', 'reason' => mb_substr($e->getMessage(), 0, 200)], 'error');
+            return $this->serverError('The budget could not be updated.');
+        }
+    }
+
+    /** GET /api/finance/budget-workspace?academic_year_id — budgets, lookups and what this user may do. */
+    public function getBudgetWorkspace($id = null, $data = [], $segments = [])
+    {
+        $roles = (array) $this->getUserRoleIds();
+        $year = (int) ($_GET['academic_year_id'] ?? 0) ?: null;
+        return $this->budgets(fn ($b) => ['budgets' => $b->list($year)] + $b->lookups() + ['can' => [
+            'prepare' => \App\API\Services\BudgetService::can('prepare', $roles),
+            'decide' => \App\API\Services\BudgetService::can('decide', $roles),
+        ]]);
+    }
+
+    /** GET /api/finance/budget-detail/{id} — lines, department quotas, spending and requests. */
+    public function getBudgetDetail($id = null, $data = [], $segments = [])
+    {
+        if (!$id) return $this->badRequest('Budget ID required');
+        return $this->budgets(fn ($b) => $b->get((int) $id));
+    }
+
+    /** POST /api/finance/budget-save — create or edit a draft budget with its department lines. */
+    public function postBudgetSave($id = null, $data = [], $segments = [])
+    {
+        return $this->budgets(fn ($b) => $b->save((array) $data, (int) $this->getUserId()), true);
+    }
+
+    /** POST /api/finance/budget-action/{id} — submit, review, approve, activate, return or close. */
+    public function postBudgetAction($id = null, $data = [], $segments = [])
+    {
+        if (!$id) return $this->badRequest('Budget ID required');
+        return $this->budgets(fn ($b) => $b->act((int) $id, (string) ($data['action'] ?? ''), $data['notes'] ?? null, (int) $this->getUserId(), (array) $this->getUserRoleIds()));
+    }
+
+    /** POST /api/finance/budget-fund-request — ask for more money on a budget line. */
+    public function postBudgetFundRequest($id = null, $data = [], $segments = [])
+    {
+        return $this->budgets(fn ($b) => $b->requestFunds((int) ($data['line_item_id'] ?? 0), (float) ($data['amount'] ?? 0), (string) ($data['reason'] ?? ''), (int) $this->getUserId()));
+    }
+
+    /** POST /api/finance/budget-fund-decision/{id} — approve or decline a request for more funds. */
+    public function postBudgetFundDecision($id = null, $data = [], $segments = [])
+    {
+        if (!$id) return $this->badRequest('Request ID required');
+        return $this->budgets(fn ($b) => $b->decideFunds((int) $id, ($data['decision'] ?? '') === 'approve', $data['reason'] ?? null, (int) $this->getUserId(), (array) $this->getUserRoleIds()));
+    }
+
+    /** GET /api/finance/financial-dashboard?academic_year_id — income vs spending, cash flow, receivables, payables, budget, decisions waiting. */
+    public function getFinancialDashboard($id = null, $data = [], $segments = [])
+    {
+        if (!$this->user) return $this->unauthorized('Authentication required');
+        $roles = (array) $this->getUserRoleIds();
+        if (!\App\API\Services\FinanceDashboardService::canView($roles)) return $this->forbidden('Financial reports are for the Director, School Administrator, Headteacher and Accountant.');
+        try {
+            $d = (new \App\API\Services\FinanceDashboardService($this->db->getConnection()))->build((int) ($_GET['academic_year_id'] ?? 0) ?: null);
+            // The Accountant sees the books; decisions waiting are the approvers' list.
+            $d['can_decide'] = (bool) array_intersect(array_map('intval', $roles), [3, 4]);
+            if (!$d['can_decide']) unset($d['waiting']);
+            return $this->success($d);
+        } catch (\Throwable $e) {
+            \App\API\Includes\FileLogger::write('finance', ['type' => 'financial_dashboard_error', 'reason' => mb_substr($e->getMessage(), 0, 200)], 'error');
+            return $this->serverError('The dashboard could not be loaded.');
+        }
+    }
+
+    /** GET /api/finance/budget-check?department_id&category_id&date — what is left for an expense. */
+    public function getBudgetCheck($id = null, $data = [], $segments = [])
+    {
+        if (!$this->user) return $this->unauthorized('Authentication required');
+        $b = new \App\API\Services\BudgetService($this->db->getConnection());
+        return $this->success(['line' => $b->lineFor((int) ($_GET['department_id'] ?? 0) ?: null, (int) ($_GET['category_id'] ?? 0) ?: null, $_GET['date'] ?? null)]);
     }
 
     // ========================================

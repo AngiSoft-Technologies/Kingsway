@@ -6511,49 +6511,16 @@ private function getCurrentStudentTransport(int $studentId): array
         ]);
     }
 
-    /** Apply active school sponsorship awards to generated fee obligations. */
+    /** Apply active school sponsorship awards to generated fee obligations (one relief row per bill). */
     private function applyExistingStudentSponsorshipToObligations(int $studentId): void
     {
         $awardsStmt = $this->db->prepare(
-            "SELECT id, academic_year_id, coverage_type, coverage_percentage, coverage_amount,
-                    starts_on, ends_on
-             FROM student_scholarship_awards
-             WHERE student_id = ? AND status = 'active'
-             ORDER BY id"
+            "SELECT id FROM student_scholarship_awards WHERE student_id = ? AND status = 'active' ORDER BY id"
         );
         $awardsStmt->execute([$studentId]);
-        $update = $this->db->prepare(
-            "UPDATE student_fee_obligations sfo
-             JOIN student_academic_enrollments sae ON sae.id = sfo.student_academic_enrollment_id
-             JOIN academic_year_terms ayt ON ayt.id = sfo.academic_year_term_id
-             SET sfo.is_sponsored = 1,
-                 sfo.sponsored_waiver_amount = LEAST(sfo.amount_due, CASE
-                    WHEN ? = 'full' THEN sfo.amount_due
-                    WHEN ? = 'percentage' THEN sfo.amount_due * ? / 100
-                    ELSE ? END),
-                 sfo.status = CASE
-                    WHEN LEAST(sfo.amount_due, CASE
-                        WHEN ? = 'full' THEN sfo.amount_due
-                        WHEN ? = 'percentage' THEN sfo.amount_due * ? / 100
-                        ELSE ? END) >= sfo.amount_due THEN 'paid'
-                    ELSE sfo.status END,
-                 sfo.updated_at = NOW()
-             WHERE sae.student_id = ? AND sfo.academic_year_id = ?
-               AND ( ? IS NULL OR ayt.closing_date >= ? )
-               AND ( ? IS NULL OR ayt.opening_date <= ? )"
-        );
-        foreach ($awardsStmt->fetchAll(PDO::FETCH_ASSOC) as $award) {
-            $type = (string) $award['coverage_type'];
-            $percentage = (float) ($award['coverage_percentage'] ?? 0);
-            $amount = (float) ($award['coverage_amount'] ?? 0);
-            $starts = $award['starts_on'] ?: null;
-            $ends = $award['ends_on'] ?: null;
-            $update->execute([
-                $type, $type, $percentage, $amount,
-                $type, $type, $percentage, $amount,
-                $studentId, (int) $award['academic_year_id'],
-                $starts, $starts, $ends, $ends,
-            ]);
+        $relief = new \App\API\Services\FeeReliefService($this->db);
+        foreach ($awardsStmt->fetchAll(PDO::FETCH_COLUMN) as $awardId) {
+            $relief->applyScholarshipAward((int) $awardId, false);
         }
     }
 

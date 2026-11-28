@@ -1457,6 +1457,8 @@ class FeeManager
                 'obligations' => $obligations,
                 'payments' => $payments,
                 'money_in' => $statement['money_in'],
+                // Every entry that moved the balance, dated, with who recorded or approved it.
+                'ledger' => $statement['ledger'],
                 'reconciliation' => $statement['reconciliation'],
                 'balance' => [
                     'balance' => $summary['closing_balance']

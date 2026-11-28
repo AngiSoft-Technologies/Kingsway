@@ -83,34 +83,40 @@ class ExpenseManager
                 $vendorId = $vendorStmt->fetchColumn() ?: null;
             }
 
-            // Validate budget line item if provided
+            // The expense is charged to its department's line on the active
+            // budget (found from its department and category when not given),
+            // and may not take the line past what is left: approved and paid
+            // expenses are spent, pending ones are already held.
+            $budgets = new \App\API\Services\BudgetService($this->db);
             if (!empty($data['budget_line_item_id'])) {
-                $stmt = $this->db->prepare("
-                    SELECT bli.allocated_amount,
-                           COALESCE(SUM(e.amount), 0) as spent
-                    FROM " . ReadReplicaService::qualifiedRef("budget_line_items") . " bli
-                    LEFT JOIN expenses e ON e.budget_line_item_id = bli.id 
-                        AND e.status != 'rejected'
-                    WHERE bli.id = ?
-                    GROUP BY bli.id
-                ");
-                $stmt->execute([$data['budget_line_item_id']]);
-                $budgetLine = $stmt->fetch(PDO::FETCH_ASSOC);
-
+                $q = $this->db->prepare('SELECT id, allocated_amount, spent_amount, committed_amount, department_id FROM budget_line_items WHERE id = ?');
+                $q->execute([(int) $data['budget_line_item_id']]);
+                $budgetLine = $q->fetch(PDO::FETCH_ASSOC);
                 if (!$budgetLine) {
                     $this->db->rollBack();
                     return formatResponse(false, null, 'Invalid budget line item');
                 }
-
-                // Check if expense exceeds budget
-                $newTotal = $budgetLine['spent'] + $data['amount'];
-                if ($newTotal > $budgetLine['allocated_amount']) {
-                    $this->db->rollBack();
-                    return formatResponse(false, null, 'Expense exceeds budget allocation');
+                $available = (float) $budgetLine['allocated_amount'] - (float) $budgetLine['spent_amount'] - (float) $budgetLine['committed_amount'];
+                if (empty($data['department_id']) && $budgetLine['department_id']) {
+                    $data['department_id'] = (int) $budgetLine['department_id'];
                 }
+            } else {
+                $line = $budgets->lineFor(
+                    !empty($data['department_id']) ? (int) $data['department_id'] : null,
+                    !empty($data['category_id']) ? (int) $data['category_id'] : null,
+                    $data['expense_date'] ?? date('Y-m-d')
+                );
+                $available = $line['available'] ?? null;
+                if ($line) $data['budget_line_item_id'] = $line['line_id'];
+            }
+            if ($available !== null && (float) $data['amount'] > $available + 0.004) {
+                $this->db->rollBack();
+                return formatResponse(false, null, sprintf(
+                    'This expense (KES %s) is more than is left on the department\'s budget line (KES %s). Ask for more funds on the line first.',
+                    number_format((float) $data['amount'], 2), number_format(max(0, $available), 2)
+                ));
             }
 
-            // Insert expense record
             $stmt = $this->db->prepare("
                 INSERT INTO expenses (
                     description, amount, category_id, expense_date,
@@ -443,7 +449,7 @@ return formatResponse(false, null, 'An internal error occurred.');
                 SET status = 'approved',
                     approved_by = ?,
                     approved_at = NOW(),
-                    notes = ?
+                    notes = COALESCE(NULLIF(?, ''), notes)
                 WHERE id = ? AND status = 'pending_approval'
             ");
 

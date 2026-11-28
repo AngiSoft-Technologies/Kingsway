@@ -133,8 +133,8 @@ private const ROUTE_ROLES = [
     'boarding_roll_call' => [4, 5, 18],  // 3 role(s)
     'boarding_students' => [18],  // 1 role(s)
     'bootstrap_school_administrator' => [2],  // 1 role(s)
-    'budget_actuals' => [10],  // 1 role(s)
-    'budget_overview' => [3, 5, 10],  // 3 role(s)
+    'budget_actuals' => [3, 4, 5, 10],  // 4 role(s)
+    'budget_overview' => [3, 4, 5, 10],  // 4 role(s)
     'catalog_orders_management' => [3, 4, 14],  // 3 role(s)
     'catering_boarding_students' => [16, 32],  // 2 role(s)
     'catering_manager_cook_lead_dashboard' => [16],  // 1 role(s)
@@ -200,6 +200,7 @@ private const ROUTE_ROLES = [
     'fee_structure_approvals' => [3],  // 1 role(s)
     'finance_approvals' => [3, 4],  // 2 role(s)
     'finance_reports' => [3, 4, 5, 10],  // 4 role(s)
+    'financial_dashboard' => [3, 4, 10],  // 3 role(s)
     'food_consumption' => [16, 71],  // 2 role(s)
     'food_low_stock' => [16, 71],  // 2 role(s)
     'food_orders' => [16, 71],  // 2 role(s)
@@ -461,6 +462,7 @@ private const ROUTE_ROLES = [
     'year_calendar' => [3, 4],  // 2 role(s)
     'year_rollover' => [4],  // 1 role(s)
 ];
+
 
 
 

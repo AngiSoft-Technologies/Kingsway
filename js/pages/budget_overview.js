@@ -1,330 +1,261 @@
 /**
- * Budget Overview Page Controller
- * Manages department budgets: summary stats, charts, table, add/edit modal, CSV export.
+ * Budgets: list, prepare, review, approve, activate and follow department
+ * quotas (BudgetService). The server decides who may do what; the page only
+ * hides buttons the user cannot use.
  */
+(() => {
+  'use strict';
+  const root = document.getElementById('budgetPage');
+  if (!root) return;
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const api = (path, method = 'GET', body = null, params = {}) => window.API.apiCall(path, method, body, params, { checkPermission: false });
+  const data = (r) => (r && r.data !== undefined && !Array.isArray(r) ? r.data : r);
+  const notify = (m, t = 'info') => window.showNotification?.(m, t);
+  const kes = (v) => 'KES ' + Number(v || 0).toLocaleString('en-KE', { maximumFractionDigits: 0 });
+  const day = (d) => { if (!d) return ''; const x = new Date(String(d).replace(' ', 'T')); return isNaN(x) ? esc(d) : x.toLocaleDateString('en-KE', { day: 'numeric', month: 'short', year: 'numeric' }); };
+  const STATUS = { draft: 'Draft', submitted: 'Submitted', under_review: 'Reviewed', approved: 'Approved', active: 'Active', closed: 'Closed', rejected: 'Returned', pending: 'Waiting' };
+  const tag = (s) => `<span class="fin-tag is-${esc(s)}">${esc(STATUS[s] || s)}</span>`;
+  const modal = (id) => bootstrap.Modal.getOrCreateInstance($(id));
+  let ws = { budgets: [], departments: [], categories: [], years: [], can: {} };
+  let current = null;
+  let noteAction = null;
 
-(function () {
-    "use strict";
+  // ------------------------------------------------------------------ list
 
-    function showToast(message, type = 'success') {
-        const el = document.createElement('div');
-        el.className = `alert alert-${type === 'error' ? 'danger' : type} alert-dismissible position-fixed top-0 end-0 m-3`;
-        el.style.zIndex = '9999';
-        el.innerHTML = message + '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>';
-        document.body.appendChild(el);
-        setTimeout(() => el.remove(), 4000);
+  async function loadList() {
+    try {
+      ws = data(await api('/finance/budget-workspace', 'GET', null, { academic_year_id: $('bgYear').value || '' }));
+    } catch (e) { $('bgListBody').innerHTML = `<tr><td colspan="8" class="text-muted p-3">${esc(e.message || 'Budgets could not be loaded.')}</td></tr>`; return; }
+    if (!$('bgYear').options.length) {
+      $('bgYear').innerHTML = ws.years.map((y) => `<option value="${y.id}" ${Number(y.is_current) ? 'selected' : ''}>${esc(y.year_code)}</option>`).join('');
+      return loadList();
     }
-
-    function kes(v) {
-        return 'KES ' + Number(v || 0).toLocaleString('en-KE', { minimumFractionDigits: 2 });
+    $('bgNew').hidden = !ws.can.prepare;
+    const period = (b) => (b.term ? `Term ${b.term}, ` : 'Whole year, ') + esc(b.academic_year || '');
+    $('bgListBody').innerHTML = ws.budgets.length ? ws.budgets.map((b) => `<tr>
+        <td><button type="button" class="btn btn-link p-0 fw-bold text-start text-decoration-none" data-open="${b.id}">${esc(b.name)}</button>
+          ${b.legacy_department_allocation ? '<div class="small text-muted">Older department allocation</div>' : ''}</td>
+        <td>${period(b)}</td><td>${tag(b.status)}</td>
+        <td class="num">${kes(b.allocated || b.total_amount)}</td><td class="num">${kes(b.spent)}</td><td class="num">${kes(b.committed)}</td>
+        <td>${esc(b.prepared_by || '')}</td><td>${esc(b.approved_by || '')}${b.approved_at ? `<div class="small text-muted">${day(b.approved_at)}</div>` : ''}</td></tr>`).join('')
+      : `<tr><td colspan="8" class="text-muted p-3">No budget for this year yet.${ws.can.prepare ? ' Use "New budget" to prepare one, department by department.' : ''}</td></tr>`;
+    if (root.dataset.start === 'active') {
+      root.dataset.start = '';
+      const active = ws.budgets.find((b) => b.status === 'active') || ws.budgets.find((b) => b.status === 'approved');
+      if (active) openBudget(active.id);
     }
+  }
 
-    function esc(str) {
-        return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    }
+  // ---------------------------------------------------------------- detail
 
-    function statusBadge(status) {
-        const map = { approved: 'success', proposed: 'warning', rejected: 'danger', draft: 'secondary' };
-        return `<span class="badge bg-${map[status] || 'secondary'}">${esc(status || 'unknown')}</span>`;
-    }
+  async function openBudget(id) {
+    try { current = data(await api(`/finance/budget-detail/${Number(id)}`)); }
+    catch (e) { notify(e.message || 'The budget could not be loaded.', 'danger'); return; }
+    renderDetail();
+    $('bgDetail').hidden = false;
+    $('bgDetail').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 
-    const Controller = {
-        data: [],
-        charts: { bar: null, doughnut: null },
+  function quota(allocated, spent, held) {
+    const total = Math.max(allocated, spent + held, 1);
+    const sp = Math.min(100, (spent / total) * 100);
+    const hd = Math.min(100 - sp, (held / total) * 100);
+    const left = allocated - spent - held;
+    const over = left < -0.004;
+    return `<div class="fin-quota${over ? ' is-over' : ''}">
+      <div class="fin-quota__bar" role="img" aria-label="${esc(`${kes(spent)} spent and ${kes(held)} held of ${kes(allocated)}; ${over ? kes(-left) + ' over' : kes(left) + ' left'}`)}">
+        <span class="fin-quota__spent" style="inline-size:${sp}%"></span><span class="fin-quota__held" style="inline-size:${hd}%"></span>${over ? '<span class="fin-quota__over"></span>' : ''}</div>
+      <div class="fin-quota__text"><span><strong>${kes(spent)}</strong> spent</span>${held ? `<span><strong>${kes(held)}</strong> held</span>` : ''}<span class="left">${over ? `${kes(-left)} over` : `${kes(left)} left`}</span><span>of ${kes(allocated)}</span></div></div>`;
+  }
 
-        init: async function () {
-            await window.AuthContext?.ready();
-            if (!AuthContext.isAuthenticated()) {
-                window.location.href = (window.APP_BASE || '') + '/index.php';
-                return;
-            }
-            this.bindEvents();
-            await this.loadData();
-        },
+  function actionsFor(b) {
+    const can = ws.can;
+    const btn = (action, label, cls = 'btn-outline-secondary') => `<button type="button" class="btn ${cls}" data-act="${action}">${esc(label)}</button>`;
+    const out = [];
+    if (can.prepare && ['draft', 'rejected'].includes(b.status)) out.push(btn('edit', 'Edit lines'), btn('submit', 'Submit for review', 'btn-fin'));
+    if (can.decide && b.status === 'submitted') out.push(btn('review', 'Mark reviewed'), btn('approve', 'Approve', 'btn-fin'), btn('return', 'Return for changes', 'btn-outline-danger'));
+    if (can.decide && b.status === 'under_review') out.push(btn('approve', 'Approve', 'btn-fin'), btn('return', 'Return for changes', 'btn-outline-danger'));
+    if (can.decide && b.status === 'approved') out.push(btn('activate', 'Make active', 'btn-fin'), btn('return', 'Return for changes', 'btn-outline-danger'));
+    if (can.decide && b.status === 'active') out.push(btn('close', 'Close the budget'));
+    out.push(btn('print', 'Print'));
+    return out.join('');
+  }
 
-        loadData: async function () {
-            try {
-                const [summaryRes, proposalsRes] = await Promise.all([
-                    window.API.finance.getDepartmentBudgetsSummary({}),
-                    window.API.finance.getDepartmentBudgetsProposals({})
-                ]);
-                const summary = (summaryRes && summaryRes.data) ? summaryRes.data : (Array.isArray(summaryRes) ? summaryRes : []);
-                const proposals = (proposalsRes && proposalsRes.data) ? proposalsRes.data : (Array.isArray(proposalsRes) ? proposalsRes : []);
-                // Merge proposals into main data (proposals not already in summary)
-                const summaryIds = new Set(summary.map(r => String(r.id)));
-                this.data = [...summary, ...proposals.filter(p => !summaryIds.has(String(p.id)))];
-                this.populateFilters();
-                this.render();
-            } catch (error) {
-                console.error('Budget overview load error:', error);
-                showToast('Failed to load budget data.', 'error');
-            }
-        },
+  function renderDetail() {
+    const b = current.budget;
+    $('bgName').innerHTML = `${esc(b.name)} ${tag(b.status)}`;
+    $('bgMeta').textContent = `${b.term ? `Term ${b.term}` : 'Whole year'}, ${b.academic_year || ''}${b.description ? `. ${b.description}` : ''}`;
+    $('bgActions').innerHTML = actionsFor(b);
+    $('bgTrail').innerHTML = b.trail.map(([what, who, when]) => `<li><strong>${esc(what)}</strong>${who ? ` by ${esc(who)}` : ''}, ${day(when)}</li>`).join('');
+    $('bgNotes').innerHTML = [b.review_notes ? `<div><strong>Review note:</strong> ${esc(b.review_notes)}</div>` : '', b.approval_notes ? `<div><strong>Approval note:</strong> ${esc(b.approval_notes)}</div>` : ''].join('');
 
-        populateFilters: function () {
-            const years = [...new Set(this.data.map(r => r.financial_year).filter(Boolean))].sort().reverse();
-            const depts = [...new Set(this.data.map(r => r.department).filter(Boolean))].sort();
+    const t = current.totals;
+    const left = t.allocated - t.spent - t.committed;
+    $('bgFacts').innerHTML = [
+      ['', 'Allocated', kes(t.allocated), `${current.lines.length} lines across ${current.departments.length} departments`],
+      ['', 'Spent', kes(t.spent), current.payroll_total ? `including ${kes(current.payroll_total)} payroll` : 'approved and paid expenses'],
+      [t.committed ? 'is-warn' : '', 'Held', kes(t.committed), 'pending expenses'],
+      [left < 0 ? 'is-stop' : 'is-ok', left < 0 ? 'Over the budget' : 'Left', kes(Math.abs(left)), t.allocated ? `${Math.round(((t.spent + t.committed) * 100) / t.allocated)}% used` : ''],
+    ].map(([c, l, v, s]) => `<li class="${c}"><span class="fin-fact__l">${esc(l)}</span><span class="fin-fact__v">${esc(v)}</span><span class="fin-fact__s">${esc(s)}</span></li>`).join('');
 
-            const fyEl = document.getElementById('financialYear');
-            const deptEl = document.getElementById('department');
-            if (fyEl) {
-                const cur = fyEl.value;
-                fyEl.innerHTML = '<option value="">All Years</option>' +
-                    years.map(y => `<option value="${esc(y)}"${y === cur ? ' selected' : ''}>${esc(y)}</option>`).join('');
-            }
-            if (deptEl) {
-                const cur = deptEl.value;
-                deptEl.innerHTML = '<option value="">All Departments</option>' +
-                    depts.map(d => `<option value="${esc(d)}"${d === cur ? ' selected' : ''}>${esc(d)}</option>`).join('');
-            }
-        },
+    $('bgDepts').innerHTML = current.departments.map((d) => `<li><div class="fin-dept__name">${esc(d.department)}<small>${d.lines} line${d.lines === 1 ? '' : 's'}${d.used_pct !== null ? `, ${d.used_pct}% used` : ''}</small></div>${quota(d.allocated, d.spent, d.committed)}</li>`).join('')
+      || '<li class="text-muted">No lines yet.</li>';
+    $('bgPayrollNote').textContent = current.payroll_without_line.length
+      ? `Payroll for departments without a salaries line: ${current.payroll_without_line.map((p) => `${p.department} ${kes(p.amount)}`).join(', ')}. Add a salaries line for them in the next budget.`
+      : (['active', 'approved', 'closed'].includes(b.status) ? 'Payroll (gross pay plus the employer\'s NSSF and housing levy) is charged to each department\'s salaries line from approved payslips.' : '');
 
-        getFiltered: function () {
-            const fy = (document.getElementById('financialYear') || {}).value || '';
-            const dept = (document.getElementById('department') || {}).value || '';
-            const status = (document.getElementById('statusFilter') || {}).value || '';
-            return this.data.filter(r =>
-                (!fy || r.financial_year === fy) &&
-                (!dept || r.department === dept) &&
-                (!status || r.status === status)
-            );
-        },
+    const live = ['approved', 'active'].includes(b.status);
+    $('bgLines').innerHTML = current.lines.map((l) => `<tr>
+        <td>${esc(l.department)}</td><td>${esc(l.category)}${l.description ? `<div class="small text-muted">${esc(l.description)}</div>` : ''}${l.payroll ? `<div class="small text-muted">includes ${kes(l.payroll)} payroll</div>` : ''}</td>
+        <td class="num">${kes(l.allocated)}</td><td>${quota(l.allocated, l.spent, l.committed)}</td>
+        <td class="num ${l.available < 0 ? 'text-danger fw-bold' : ''}">${kes(l.available)}</td>
+        <td class="d-print-none text-end">${live ? `<button type="button" class="btn btn-sm btn-outline-secondary" data-more="${l.id}">Ask for more</button>` : ''}</td></tr>`).join('')
+      || '<tr><td colspan="6" class="text-muted p-3">No lines yet.</td></tr>';
 
-        render: function () {
-            const rows = this.getFiltered();
-            this.renderStats(rows);
-            this.renderTable(rows);
-            this.renderCharts(rows);
-        },
+    $('bgReqs').innerHTML = current.requests.map((r) => `<tr>
+        <td>${esc(r.line)}</td><td class="num">${kes(r.amount)}</td><td>${esc(r.reason || '')}</td>
+        <td>${esc(r.requested_by || '')}<div class="small text-muted">${day(r.requested_at)}</div></td>
+        <td>${tag(r.status === 'rejected' ? 'rejected' : r.status)}${r.decided_by ? `<div class="small text-muted">${esc(r.decided_by)}, ${day(r.decided_at)}</div>` : ''}${r.rejection_reason ? `<div class="small">${esc(r.rejection_reason)}</div>` : ''}</td>
+        <td class="d-print-none text-end text-nowrap">${ws.can.decide && r.status === 'pending' ? `<button type="button" class="btn btn-sm btn-fin" data-req="${r.id}" data-dec="approve">Approve</button> <button type="button" class="btn btn-sm btn-outline-danger" data-req="${r.id}" data-dec="decline">Decline</button>` : ''}</td></tr>`).join('')
+      || '<tr><td colspan="6" class="text-muted p-3">No requests for more funds.</td></tr>';
+  }
 
-        renderStats: function (rows) {
-            const totalBudget = rows.reduce((s, r) => s + Number(r.allocated_amount || 0), 0);
-            const totalSpent  = rows.reduce((s, r) => s + Number(r.spent_amount || 0), 0);
-            const remaining   = totalBudget - totalSpent;
-            const utilization = totalBudget > 0 ? ((totalSpent / totalBudget) * 100).toFixed(1) : '0.0';
-            const setText = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
-            setText('totalBudget', kes(totalBudget));
-            setText('totalSpent',  kes(totalSpent));
-            setText('remaining',   kes(remaining));
-            setText('utilization', utilization + '%');
-        },
+  // ----------------------------------------------------------------- edit
 
-        renderTable: function (rows) {
-            const tbody = document.querySelector('#budgetTable');
-            if (!tbody) return;
+  const opt = (list, val, label, blank) => (blank ? `<option value="">${esc(blank)}</option>` : '') + list.map((x) => `<option value="${x.id}" ${Number(x.id) === Number(val) ? 'selected' : ''}>${esc(label(x))}</option>`).join('');
+  function lineRow(l = {}) {
+    return `<tr data-id="${Number(l.id) || ''}">
+      <td><select class="form-select form-select-sm" data-f="department_id" aria-label="Department">${opt(ws.departments, l.department_id, (d) => d.name, 'School-wide')}</select></td>
+      <td><select class="form-select form-select-sm" data-f="category_id" aria-label="Category">${opt(ws.categories, l.category_id, (c) => c.name, 'Choose a category')}</select></td>
+      <td><input class="form-control form-control-sm" type="number" min="0" step="0.01" data-f="allocated_amount" aria-label="Amount" value="${esc(l.allocated ?? l.allocated_amount ?? '')}"></td>
+      <td><input class="form-control form-control-sm" data-f="description" maxlength="255" aria-label="What it covers" value="${esc(l.description || '')}"></td>
+      <td><button type="button" class="btn btn-sm btn-outline-secondary" data-rm aria-label="Remove this line"><i class="bi bi-x-lg" aria-hidden="true"></i></button></td></tr>`;
+  }
+  function editTotal() {
+    const sum = [...$('bgEditLines').querySelectorAll('[data-f="allocated_amount"]')].reduce((s, i) => s + Number(i.value || 0), 0);
+    $('bgEditTotal').textContent = `Total ${kes(sum)}`;
+  }
+  function openEdit(b = null) {
+    $('bgEditTitle').textContent = b ? `Edit ${b.budget.name}` : 'New budget';
+    $('bgEditId').value = b ? b.budget.id : '';
+    $('bgEditName').value = b ? b.budget.name : '';
+    $('bgEditYear').innerHTML = opt(ws.years, b ? b.budget.academic_year_id : $('bgYear').value, (y) => y.year_code);
+    $('bgEditTerm').value = b && b.budget.term ? String(b.budget.term) : '';
+    $('bgEditDesc').value = b ? (b.budget.description || '') : '';
+    const lines = b ? b.lines : [];
+    $('bgEditLines').innerHTML = (lines.length ? lines : [{}, {}, {}]).map(lineRow).join('');
+    editTotal();
+    modal('bgEditModal').show();
+  }
+  async function saveEdit(e) {
+    e.preventDefault();
+    const lines = [...$('bgEditLines').querySelectorAll('tr')].map((tr) => {
+      const o = { id: Number(tr.dataset.id) || null };
+      tr.querySelectorAll('[data-f]').forEach((f) => { o[f.dataset.f] = f.value; });
+      return o;
+    }).filter((l) => l.category_id || Number(l.allocated_amount));
+    try {
+      const res = data(await api('/finance/budget-save', 'POST', { id: $('bgEditId').value || null, name: $('bgEditName').value.trim(), academic_year_id: $('bgEditYear').value, term: $('bgEditTerm').value, description: $('bgEditDesc').value.trim(), lines }));
+      modal('bgEditModal').hide();
+      notify('Budget saved as a draft.', 'success');
+      await loadList();
+      openBudget(res.id);
+    } catch (err) { notify(err.message || 'The budget could not be saved.', 'danger'); }
+  }
 
-            if (!rows.length) {
-                tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">No budget records found.</td></tr>';
-                this.renderFooter([]);
-                return;
-            }
+  // --------------------------------------------------------------- actions
 
-            tbody.innerHTML = rows.map(r => {
-                const alloc = Number(r.allocated_amount || 0);
-                const spent = Number(r.spent_amount || 0);
-                const rem   = alloc - spent;
-                const pct   = alloc > 0 ? ((spent / alloc) * 100).toFixed(1) : '0.0';
-                const barCls = pct > 90 ? 'bg-danger' : pct > 70 ? 'bg-warning' : 'bg-success';
-                const approveBtn = r.status === 'proposed'
-                    ? `<button class="btn btn-sm btn-outline-success approve-btn" data-id="${esc(r.id)}">Approve</button>`
-                    : '';
-                return `<tr>
-                    <td>${esc(r.financial_year)}</td>
-                    <td>${esc(r.department)}</td>
-                    <td>${esc(r.category)}</td>
-                    <td class="text-end">${kes(alloc)}</td>
-                    <td class="text-end">${kes(spent)}</td>
-                    <td class="text-end${rem < 0 ? ' text-danger fw-semibold' : ''}">${kes(rem)}</td>
-                    <td style="min-width:120px">
-                        <div class="d-flex align-items-center gap-2">
-                            <div class="progress flex-grow-1" style="height:6px">
-                                <div class="progress-bar ${barCls}" style="width:${Math.min(Number(pct), 100)}%"></div>
-                            </div>
-                            <small class="text-nowrap">${pct}%</small>
-                        </div>
-                    </td>
-                    <td>${statusBadge(r.status)}</td>
-                    <td class="text-nowrap">
-                        <button class="btn btn-sm btn-outline-primary me-1 edit-btn" data-id="${esc(r.id)}">Edit</button>
-                        ${approveBtn}
-                    </td>
-                </tr>`;
-            }).join('');
+  const NOTE = {
+    review: ['Mark reviewed', 'Your review note (optional). The budget then goes for approval.', false],
+    approve: ['Approve the budget', 'Approval note (optional). Approving does not yet make the allocations live: "Make active" does.', false],
+    return: ['Return for changes', 'Say what needs changing. The preparer can edit and resubmit.', true],
+    more: ['Ask for more funds', 'Say what the extra money is for. The School Administrator or Director decides.', true],
+    decline: ['Decline the request', 'Say why the request is declined.', true],
+  };
+  function askNote(action, extra = {}) {
+    noteAction = { action, ...extra };
+    const [title, help, required] = NOTE[action];
+    $('bgNoteTitle').textContent = title;
+    $('bgNoteHelp').textContent = help;
+    $('bgNoteLabel').textContent = required ? 'Reason (required)' : 'Note';
+    $('bgNoteText').value = '';
+    $('bgNoteAmountWrap').hidden = action !== 'more';
+    $('bgNoteAmount').value = '';
+    modal('bgNoteModal').show();
+  }
+  async function act(action, notes = null) {
+    try {
+      await api(`/finance/budget-action/${current.budget.id}`, 'POST', { action, notes });
+      notify({ submit: 'Submitted for review.', review: 'Marked reviewed.', approve: 'Budget approved.', activate: 'Budget is now active. Department allocations are live.', return: 'Returned for changes.', close: 'Budget closed.' }[action] || 'Done.', 'success');
+      await loadList();
+      openBudget(current.budget.id);
+    } catch (e) { notify(e.message || 'That could not be done.', 'danger'); }
+  }
+  async function noteSubmit(e) {
+    e.preventDefault();
+    const text = $('bgNoteText').value.trim();
+    const { action } = noteAction;
+    if (NOTE[action][2] && !text) { notify('Please give a reason.', 'warning'); $('bgNoteText').focus(); return; }
+    try {
+      if (action === 'more') {
+        await api('/finance/budget-fund-request', 'POST', { line_item_id: noteAction.line, amount: $('bgNoteAmount').value, reason: text });
+        notify('Request sent for a decision.', 'success');
+      } else if (action === 'decline') {
+        await api(`/finance/budget-fund-decision/${noteAction.req}`, 'POST', { decision: 'decline', reason: text });
+        notify('Request declined.', 'success');
+      } else {
+        modal('bgNoteModal').hide();
+        await act(action, text || null);
+        return;
+      }
+      modal('bgNoteModal').hide();
+      openBudget(current.budget.id);
+    } catch (err) { notify(err.message || 'That could not be done.', 'danger'); }
+  }
 
-            this.renderFooter(rows);
-            this.bindTableActions();
-        },
+  // ---------------------------------------------------------------- export
 
-        renderFooter: function (rows) {
-            const alloc = rows.reduce((s, r) => s + Number(r.allocated_amount || 0), 0);
-            const spent = rows.reduce((s, r) => s + Number(r.spent_amount || 0), 0);
-            const rem   = alloc - spent;
-            const pct   = alloc > 0 ? ((spent / alloc) * 100).toFixed(1) : '0.0';
-            const setText = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
-            setText('totalAllocated',  kes(alloc));
-            setText('footerSpent',     kes(spent));
-            setText('footerRemaining', kes(rem));
-            setText('footerPercent',   pct + '%');
-        },
+  async function csv(name, head, rows) {
+    const cell = (v) => { const t = String(v ?? ''); return /[",\r\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+    try { await window.KingswayFileLifecycle.exportText(`﻿${[head, ...rows].map((r) => r.map(cell).join(',')).join('\r\n')}`, name, 'text/csv;charset=utf-8'); }
+    catch (e) { notify(e.message || 'Export failed', 'danger'); }
+  }
 
-        renderCharts: function (rows) {
-            const ChartJS = (typeof window !== 'undefined' && window.Chart) || (typeof Chart !== 'undefined' ? Chart : null);
-            if (!ChartJS) return;
-
-            const deptMap = {};
-            rows.forEach(r => {
-                const d = r.department || 'Unknown';
-                if (!deptMap[d]) deptMap[d] = { budget: 0, spent: 0 };
-                deptMap[d].budget += Number(r.allocated_amount || 0);
-                deptMap[d].spent  += Number(r.spent_amount || 0);
-            });
-            const labels  = Object.keys(deptMap);
-            const budgets = labels.map(d => deptMap[d].budget);
-            const spents  = labels.map(d => deptMap[d].spent);
-            const palette = ['#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f','#edc948','#b07aa1','#ff9da7','#9c755f','#bab0ac'];
-
-            const barCanvasEl = document.getElementById('budgetVsActualChart');
-            if (barCanvasEl) {
-                if (this.charts.bar) this.charts.bar.destroy();
-                this.charts.bar = new ChartJS(barCanvasEl.getContext('2d'), {
-                    type: 'bar',
-                    data: {
-                        labels,
-                        datasets: [
-                            { label: 'Budget',       data: budgets, backgroundColor: '#4e79a7' },
-                            { label: 'Actual Spend', data: spents,  backgroundColor: '#e15759' }
-                        ]
-                    },
-                    options: {
-                        responsive: true,
-                        plugins: { legend: { position: 'top' } },
-                        scales: { y: { ticks: { callback: v => 'KES ' + Number(v).toLocaleString() } } }
-                    }
-                });
-            }
-
-            const doughCanvasEl = document.getElementById('departmentChart');
-            if (doughCanvasEl) {
-                if (this.charts.doughnut) this.charts.doughnut.destroy();
-                this.charts.doughnut = new ChartJS(doughCanvasEl.getContext('2d'), {
-                    type: 'doughnut',
-                    data: {
-                        labels,
-                        datasets: [{ data: spents, backgroundColor: palette.slice(0, labels.length) }]
-                    },
-                    options: {
-                        responsive: true,
-                        plugins: {
-                            legend: { position: 'right' },
-                            tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${kes(ctx.parsed)}` } }
-                        }
-                    }
-                });
-            }
-        },
-
-        bindEvents: function () {
-            ['financialYear', 'department', 'statusFilter'].forEach(id => {
-                const el = document.getElementById(id);
-                if (el) el.addEventListener('change', () => this.render());
-            });
-            const addBtn = document.getElementById('addBudgetBtn');
-            if (addBtn) addBtn.addEventListener('click', () => this.openModal());
-            const exportBtn = document.getElementById('exportBtn');
-            if (exportBtn) exportBtn.addEventListener('click', () => this.exportCSV());
-            const saveBtn = document.getElementById('saveBudgetBtn');
-            if (saveBtn) saveBtn.addEventListener('click', () => this.saveBudget());
-        },
-
-        bindTableActions: function () {
-            document.querySelectorAll('.edit-btn').forEach(btn => {
-                btn.addEventListener('click', () => {
-                    const row = this.data.find(r => String(r.id) === String(btn.dataset.id));
-                    if (row) this.openModal(row);
-                });
-            });
-            document.querySelectorAll('.approve-btn').forEach(btn => {
-                btn.addEventListener('click', () => this.approveBudget(btn.dataset.id));
-            });
-        },
-
-        openModal: function (row = null) {
-            const setVal = (id, val) => { const el = document.getElementById(id); if (el) el.value = val || ''; };
-            const setTxt = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
-            setTxt('budgetModalTitle', row ? 'Edit Budget' : 'Add Budget');
-            setVal('budgetId',          row ? row.id : '');
-            setVal('fyear',             row ? row.financial_year : '');
-            setVal('category',          row ? row.category : '');
-            setVal('budgetDepartment',  row ? row.department : '');
-            setVal('amount',            row ? row.allocated_amount : '');
-            setVal('budgetDescription', row ? row.description : '');
-            setVal('budgetStatus',      row ? row.status : 'proposed');
-            const modalEl = document.getElementById('budgetModal');
-            if (modalEl && window.bootstrap) new window.bootstrap.Modal(modalEl).show();
-        },
-
-        saveBudget: async function () {
-            const getVal = id => (document.getElementById(id) || {}).value || '';
-            const id = getVal('budgetId');
-            // Keys the proposal handler actually reads: title, academic_year,
-             // term, amount_requested, created_by. The previous names
-               // (financial_year, allocated_amount) were ignored, so every
-               // proposal was stored with amount 0 and the current year.
-            const payload = {
-                title:             getVal('budgetTitle') || 'Department budget proposal',
-                academic_year:     getVal('fyear'),
-                term:              getVal('term') || null,
-                amount_requested:  getVal('amount'),
-                description:       getVal('budgetDescription'),
-                department_id:     getVal('budgetDepartment'),
-                status:            getVal('budgetStatus')
-            };
-            if (id) payload.id = id;
-            try {
-                await window.API.finance.proposeDepartmentBudget(payload);
-                showToast(id ? 'Budget updated successfully.' : 'Budget proposed successfully.');
-                const modalEl = document.getElementById('budgetModal');
-                if (modalEl && window.bootstrap) window.bootstrap.Modal.getInstance(modalEl)?.hide();
-                await this.loadData();
-            } catch (err) {
-                console.error('Save budget error:', err);
-                showToast('Failed to save budget.', 'error');
-            }
-        },
-
-        approveBudget: async function (id) {
-            if (!(await window.confirmAction('Confirm', 'Approve this budget entry?'))) return;
-            try {
-                // The handler reads proposal_id (or budget_id); `{id}` always
-                // failed validation with "proposal_id is required".
-                await window.API.finance.approveDepartmentBudget({
-                    proposal_id: id,
-                    status: 'approved',
-                });
-                showToast('Budget approved successfully.');
-                await this.loadData();
-            } catch (err) {
-                console.error('Approve budget error:', err);
-                showToast('Approval failed.', 'error');
-            }
-        },
-
-        exportCSV: function () {
-            const rows = this.getFiltered();
-            const headers = ['Financial Year', 'Department', 'Category', 'Allocated (KES)', 'Spent (KES)', 'Remaining (KES)', 'Utilization %', 'Status'];
-            const lines = [headers.join(',')];
-            rows.forEach(r => {
-                const alloc = Number(r.allocated_amount || 0);
-                const spent = Number(r.spent_amount || 0);
-                const rem   = alloc - spent;
-                const pct   = alloc > 0 ? ((spent / alloc) * 100).toFixed(1) : '0.0';
-                lines.push([r.financial_year, r.department, r.category, alloc.toFixed(2), spent.toFixed(2), rem.toFixed(2), pct, r.status].join(','));
-            });
-            KingswayFileLifecycle.exportText(lines.join('\n'), `budget_overview_${new Date().toISOString().slice(0,10)}.csv`, 'text/csv');
-        }
-    };
-
-    window.BudgetOverviewController = Controller;
-    window.APIRealtime?.register?.('BudgetOverviewController', Controller);
-    document.addEventListener('DOMContentLoaded', () => Controller.init());
+  async function init() {
+    await window.AuthContext?.ready?.();
+    if (root.dataset.start === 'active') $('bgTitle').textContent = 'Budget vs actuals';
+    $('bgYear').addEventListener('change', () => { $('bgDetail').hidden = true; loadList(); });
+    $('bgNew').addEventListener('click', () => openEdit());
+    $('bgListBody').addEventListener('click', (e) => { const b = e.target.closest('[data-open]'); if (b) openBudget(b.dataset.open); });
+    $('bgActions').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-act]'); if (!b) return;
+      const a = b.dataset.act;
+      if (a === 'edit') openEdit(current);
+      else if (a === 'print') window.print();
+      else if (NOTE[a]) askNote(a);
+      else act(a);
+    });
+    $('bgLines').addEventListener('click', (e) => { const b = e.target.closest('[data-more]'); if (b) askNote('more', { line: Number(b.dataset.more) }); });
+    $('bgReqs').addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-req]'); if (!b) return;
+      if (b.dataset.dec === 'decline') { askNote('decline', { req: Number(b.dataset.req) }); return; }
+      try { await api(`/finance/budget-fund-decision/${b.dataset.req}`, 'POST', { decision: 'approve' }); notify('Approved. The amount is added to the line.', 'success'); openBudget(current.budget.id); }
+      catch (err) { notify(err.message || 'That could not be done.', 'danger'); }
+    });
+    $('bgEditAdd').addEventListener('click', () => { $('bgEditLines').insertAdjacentHTML('beforeend', lineRow()); });
+    $('bgEditLines').addEventListener('click', (e) => { const b = e.target.closest('[data-rm]'); if (b) { b.closest('tr').remove(); editTotal(); } });
+    $('bgEditLines').addEventListener('input', editTotal);
+    $('bgEditForm').addEventListener('submit', saveEdit);
+    $('bgNoteForm').addEventListener('submit', noteSubmit);
+    $('bgPrint').addEventListener('click', () => window.print());
+    $('bgListCsv').addEventListener('click', () => csv('budgets.csv', ['Budget', 'Year', 'Term', 'Status', 'Allocated', 'Spent', 'Held', 'Prepared by', 'Approved by'],
+      ws.budgets.map((b) => [b.name, b.academic_year, b.term || 'Whole year', STATUS[b.status] || b.status, b.allocated || b.total_amount, b.spent, b.committed, b.prepared_by, b.approved_by])));
+    $('bgLinesCsv').addEventListener('click', () => current && csv(`budget_${current.budget.id}_lines.csv`, ['Department', 'Category', 'Allocated', 'Spent', 'Of which payroll', 'Held', 'Left', 'Used %'],
+      current.lines.map((l) => [l.department, l.category, l.allocated, l.spent, l.payroll, l.committed, l.available, l.used_pct ?? ''])));
+    if (window.AuthContext?.canExport?.() === false) { $('bgListCsv').hidden = true; $('bgLinesCsv').hidden = true; }
+    window.APIRealtime?.register?.('budget_overview', { refresh: () => { loadList(); if (current) openBudget(current.budget.id); } }, ['finance']);
+    await loadList();
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();

@@ -1520,64 +1520,30 @@ document.addEventListener('DOMContentLoaded', () => {
             const statement = await this.safeCall(API.finance.getStudentFeeStatement(this.studentId));
             if (!statement) return;
 
-            const obligations = statement.obligations || [];
-            const payments = statement.payments || [];
-            const rows = [];
-
-            rows.push(["Section", "Date", "Description", "Amount", "Balance"]);
-            obligations.forEach((o) => {
-                rows.push([
-                    "Obligation",
-                    o.created_at || "",
-                    o.fee_structure_name || "",
-                    o.amount || o.total_fee || 0,
-                    o.balance || 0
-                ]);
-            });
-
-            payments.forEach((p) => {
-                rows.push([
-                    "Payment",
-                    p.payment_date || "",
-                    p.payment_method || "",
-                    p.amount_paid || p.amount || 0,
-                    ""
-                ]);
-            });
-
             if (!window.PrintManager) {
                 this.notify("PrintManager not available for export", "error");
                 return;
             }
-
+            // The account statement: every entry that moved the balance, with who.
+            const entries = statement.ledger?.entries || [];
             const columns = [
-                { key: 'section', label: 'Section' },
                 { key: 'date', label: 'Date' },
-                { key: 'description', label: 'Description' },
-                { key: 'amount', label: 'Amount' },
+                { key: 'description', label: 'Details' },
+                { key: 'term', label: 'Term' },
+                { key: 'detail', label: 'Reference or reason' },
+                { key: 'by', label: 'Recorded or approved by' },
+                { key: 'debit', label: 'Charged' },
+                { key: 'credit', label: 'Credited' },
                 { key: 'balance', label: 'Balance' }
             ];
-
-            const dataRows = [];
-            obligations.forEach((o) => {
-                dataRows.push({
-                    section: "Obligation",
-                    date: o.created_at || "",
-                    description: o.fee_structure_name || "",
-                    amount: o.amount || o.total_fee || 0,
-                    balance: o.balance || 0
-                });
-            });
-
-            payments.forEach((p) => {
-                dataRows.push({
-                    section: "Payment",
-                    date: p.payment_date || "",
-                    description: p.payment_method || "",
-                    amount: p.amount_paid || p.amount || 0,
-                    balance: ""
-                });
-            });
+            const dataRows = entries.map((e) => ({
+                date: e.date || "", description: e.description || "", term: e.term || "", detail: e.detail || "",
+                by: e.by || "", debit: e.debit || "", credit: e.credit || "", balance: e.balance ?? ""
+            }));
+            if (statement.ledger) {
+                dataRows.push({ date: "", description: "Closing balance", term: "", detail: "", by: "",
+                    debit: statement.ledger.total_debit, credit: statement.ledger.total_credit, balance: statement.ledger.closing_balance });
+            }
 
             window.PrintManager.exportToCSV({
                 filename: `fee_statement_${this.studentId}.csv`,

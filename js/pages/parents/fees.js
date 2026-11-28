@@ -65,7 +65,9 @@
             '<div class="table-responsive mb-3"><table class="pp-table table-sm"><thead><tr><th>Fee Type</th><th>Billed</th><th>Paid</th><th>Waived</th><th>Balance</th><th>Status</th></tr></thead><tbody>' + rows + '</tbody>' +
             '<tfoot class="fw-bold"><tr><td>Total</td><td>KES ' + (Number(term.total_due || 0) + Number(term.arrears_brought_forward || 0)).toLocaleString() + '</td><td>KES ' + Number(term.total_paid || 0).toLocaleString() + '</td><td>KES ' + Number(term.total_waived || 0).toLocaleString() + '</td><td>' +
             (Number(term.balance || 0) < 0 ? 'KES ' + Math.abs(Number(term.balance)).toLocaleString() + ' CR' : 'KES ' + Number(term.balance || 0).toLocaleString()) + '</td><td>' + payBtn + '</td></tr></tfoot></table></div>';
-        }).join('') + closingHtml + '</div></div>';
+        }).join('') +
+        (yr.ledger && window.FeeLedger ? window.FeeLedger.html(yr.ledger, { title: 'Account statement for ' + yr.year, tableClass: 'pp-table table-sm' }) : '') +
+        closingHtml + '</div></div>';
     }).join('');
   }
 
