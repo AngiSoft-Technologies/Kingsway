@@ -84,6 +84,8 @@ body { font-family: 'DejaVu Sans', Arial, sans-serif; font-size: 8.5pt; color: #
 
 .stmt-notes { margin-top: 3mm; font-size: 7.5pt; color: #1e293b; border: 0.5pt solid #c9941d; padding: 2mm 3mm; background: #fff9e9; }
 .stmt-notes strong { color: #062653; }
+.stmt-table.ledger td { vertical-align: top; }
+.stmt-table .muted { color: #475569; font-size: 7pt; font-weight: 400; }
 .stmt-warning { margin-top: 2mm; font-size: 7.5pt; color: #7f1d1d; border: 0.5pt solid #dc2626; padding: 2mm 3mm; background: #fef2f2; }
 </style>
 </head>
@@ -227,24 +229,27 @@ body { font-family: 'DejaVu Sans', Arial, sans-serif; font-size: 8.5pt; color: #
         </tbody>
     </table>
 
-    <?php if (!empty($s['payments']) || ($money['recorded_at_go_live'] ?? 0) > 0): ?>
-    <h3 class="stmt-h">Money received for <?= se($year) ?></h3>
-    <table class="stmt-table">
-        <thead><tr><th>Date</th><th>Method</th><th>Receipt No.</th><th>Reference</th><th class="amt">Amount</th></tr></thead>
+    <?php $ledger = $s['ledger'] ?? null; ?>
+    <?php if ($ledger): ?>
+    <h3 class="stmt-h">Account statement for <?= se($year) ?></h3>
+    <table class="stmt-table ledger">
+        <thead><tr><th style="width:15%">Date</th><th>Details</th><th style="width:15%">By</th><th class="amt" style="width:11%">Charged</th><th class="amt" style="width:11%">Credited</th><th class="amt" style="width:12%">Balance</th></tr></thead>
         <tbody>
-        <?php if (($money['recorded_at_go_live'] ?? 0) > 0): ?>
-            <tr><td colspan="4">Payments recorded before the online system</td><td class="amt"><?= sm($money['recorded_at_go_live']) ?></td></tr>
-        <?php endif; ?>
-        <?php foreach (($s['payments'] ?? []) as $payment): ?>
-            <tr>
-                <td><?= se(substr((string)($payment['payment_date'] ?? ''), 0, 10)) ?></td>
-                <td><?= se($payment['method'] ?? '') ?></td>
-                <td><?= se($payment['receipt_no'] ?? '') ?></td>
-                <td><?= se($payment['reference'] ?? '') ?></td>
-                <td class="amt"><?= sm($payment['amount'] ?? 0) ?></td>
+        <?php foreach (($ledger['entries'] ?? []) as $e): ?>
+            <tr class="<?= in_array($e['kind'] ?? '', ['brought_forward', 'credit_brought_forward'], true) ? 'bf' : '' ?>">
+                <td><?= se(date('j M Y', strtotime((string) ($e['date'] ?? 'now')))) ?></td>
+                <td><strong><?= se($e['description'] ?? '') ?></strong><?= !empty($e['term']) ? ' <span class="muted">(' . se($e['term']) . ')</span>' : '' ?>
+                    <?php if (!empty($e['detail'])): ?><div class="muted"><?= se($e['detail']) ?></div><?php endif; ?></td>
+                <td><?= se($e['by'] ?? '') ?></td>
+                <td class="amt"><?= ($e['debit'] ?? 0) > 0 ? sm($e['debit']) : '' ?></td>
+                <td class="amt"><?= ($e['credit'] ?? 0) > 0 ? sm($e['credit']) : '' ?></td>
+                <td class="amt"><?= fs_balance($e['balance'] ?? 0) ?></td>
             </tr>
         <?php endforeach; ?>
-            <tr class="total"><td colspan="4">Total received</td><td class="amt"><?= sm($money['total'] ?? 0) ?></td></tr>
+        <?php if (empty($ledger['entries'])): ?>
+            <tr><td colspan="6" style="text-align:center; color:#64748b;">Nothing was billed or received for this year.</td></tr>
+        <?php endif; ?>
+            <tr class="total"><td colspan="3">Totals and closing balance</td><td class="amt"><?= sm($ledger['total_debit'] ?? 0) ?></td><td class="amt"><?= sm($ledger['total_credit'] ?? 0) ?></td><td class="amt"><?= fs_balance($ledger['closing_balance'] ?? 0) ?></td></tr>
         </tbody>
     </table>
     <?php endif; ?>
@@ -275,7 +280,9 @@ body { font-family: 'DejaVu Sans', Arial, sans-serif; font-size: 8.5pt; color: #
     <?php if (($bf['credit_not_yet_applied'] ?? 0) > 0): ?>
     <div class="stmt-notes"><strong>Credit available:</strong> KES <?= sm($bf['credit_not_yet_applied']) ?> brought forward has not yet been applied to a bill and will reduce future fees.</div>
     <?php endif; ?>
-    <?php if (empty($s['reconciliation']['ok'])): ?>
+    <?php if (!empty($s['ledger']) && empty($s['ledger']['matches_recorded_balance'])): ?>
+    <div class="stmt-warning"><strong>Check required:</strong> the entries above add up to KES <?= fs_balance($s['ledger']['closing_balance'] ?? 0) ?>, but the recorded balance is KES <?= fs_balance($sum['closing_balance'] ?? 0) ?>. Please contact the accounts office before relying on it.</div>
+    <?php elseif (empty($s['reconciliation']['ok'])): ?>
     <div class="stmt-warning"><strong>Check required:</strong> this statement does not add up (difference KES <?= sm($s['reconciliation']['difference'] ?? 0) ?>). Please contact the accounts office before relying on it.</div>
     <?php endif; ?>
     <div class="stmt-notes">

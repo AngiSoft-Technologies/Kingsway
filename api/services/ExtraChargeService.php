@@ -192,12 +192,12 @@ final class ExtraChargeService
             if ($registrationType === 'none') $registrationType = 'full';
             if ($schoolType === 'none' && $row['waiver_type'] === 'full_waiver') $schoolType = 'full';
         }
+        // Only the relief granted at this admission (scholarships are listed on their own).
         $schoolAmount = $this->db->prepare(
-            "SELECT COALESCE(SUM(sponsored_waiver_amount), 0)
-               FROM " . ReadReplicaService::qualifiedRef("student_fee_obligations_enrolled") . "
-              WHERE student_id = ?"
+            "SELECT COALESCE(SUM(amount), 0) FROM student_fee_relief_entries
+              WHERE student_id = ? AND source = 'admission_relief' AND source_id = ? AND status = 'active'"
         );
-        $schoolAmount->execute([$studentId]);
+        $schoolAmount->execute([$studentId, (int) $row['application_id']]);
         $registrationAmount = $this->db->prepare(
             "SELECT COALESCE(SUM(eao.amount_waived), 0)
                FROM extra_charge_application_obligations eao
@@ -255,28 +255,42 @@ final class ExtraChargeService
         }
 
         if ($enrollmentId && $relief['school_fee_waiver_type'] !== 'none') {
+            // Who authorised the relief and when (the admission exception record).
+            $who = $this->db->prepare(
+                "SELECT skipped_by, skipped_at, reason, reason_code, waiver_details FROM admission_stage_skip_audit
+                  WHERE application_id=? AND waiver_type IS NOT NULL ORDER BY id DESC LIMIT 1"
+            );
+            $who->execute([$applicationId]);
+            $auth = $who->fetch(PDO::FETCH_ASSOC) ?: [];
+            $authDetails = json_decode((string) ($auth['waiver_details'] ?? ''), true);
+            $authDetails = is_array($authDetails) ? $authDetails : [];
+            $grantedBy = (int) ($authDetails['authorized_by'] ?? $auth['skipped_by'] ?? 0) ?: null;
+            $grantedAt = $authDetails['authorized_at'] ?? $auth['skipped_at'] ?? null;
+            $reason = $relief['reason'] ?: ($auth['reason'] ?? $auth['reason_code'] ?? null);
+            $kind = $relief['school_fee_waiver_type'];
+            $label = 'Fee relief granted at admission ('
+                . ($kind === 'full' ? 'full fees' : ($kind === 'percentage' ? rtrim(rtrim(number_format($relief['school_fee_waiver_value'], 2), '0'), '.') . '% of fees' : 'fixed amount'))
+                . ')';
+
             $rows = $this->db->prepare(
-                "SELECT id, amount_due, sponsored_waiver_amount, status
+                "SELECT id, amount_due
                  FROM student_fee_obligations
                  WHERE student_academic_enrollment_id=? ORDER BY academic_year_term_id, id FOR UPDATE"
             );
             $rows->execute([$enrollmentId]);
-            $remaining = $relief['school_fee_waiver_type'] === 'fixed' ? $relief['school_fee_waiver_value'] : 0.0;
+            $remaining = $kind === 'fixed' ? $relief['school_fee_waiver_value'] : 0.0;
+            $ledger = new FeeReliefService($this->db);
             foreach ($rows->fetchAll(PDO::FETCH_ASSOC) as $row) {
                 $due = (float) $row['amount_due'];
-                $waiver = $relief['school_fee_waiver_type'] === 'full'
+                $waiver = $kind === 'full'
                     ? $due
-                    : ($relief['school_fee_waiver_type'] === 'percentage'
+                    : ($kind === 'percentage'
                         ? $due * $relief['school_fee_waiver_value'] / 100
                         : min($due, max(0, $remaining)));
-                $waiver = round(min($due, max((float) $row['sponsored_waiver_amount'], $waiver)), 2);
-                if ($relief['school_fee_waiver_type'] === 'fixed') $remaining = max(0, $remaining - $waiver);
-                $status = $waiver >= $due ? 'paid' : ($waiver > 0 && $row['status'] === 'pending' ? 'partial' : $row['status']);
-                $this->db->prepare(
-                    "UPDATE student_fee_obligations
-                     SET is_sponsored=1, sponsored_waiver_amount=?, status=?, updated_at=NOW()
-                     WHERE id=?"
-                )->execute([$waiver, $status, (int) $row['id']]);
+                $waiver = round(min($due, max(0, $waiver)), 2);
+                if ($kind === 'fixed') $remaining = max(0, $remaining - $waiver);
+                // Its own relief row: it no longer replaces a scholarship on the same bill.
+                $ledger->grant((int) $row['id'], 'admission_relief', $applicationId, $waiver, $label, $reason, $grantedBy, $grantedAt);
             }
         }
         return $relief;

@@ -893,6 +893,7 @@ class SidebarConfigReader
             'manage_fee_' => 'Finance',
             'finance_' => 'Finance',
             'budget_' => 'Finance',
+            'financial_dashboard' => 'Finance',
             'manage_expenses' => 'Finance',
             'transaction_approvals' => 'Controls & Audit',
             'audit_logs' => 'Controls & Audit',

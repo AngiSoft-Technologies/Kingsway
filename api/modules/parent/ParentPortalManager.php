@@ -3369,6 +3369,17 @@ class ParentPortalManager extends BaseAPI
         $extraStmt->execute([':sid' => $studentId]);
         $obligations = array_merge($obligations, $extraStmt->fetchAll(PDO::FETCH_ASSOC));
 
+        // Waivers the accounts office granted on each tuition bill (they lower the
+        // balance, so they must show on the bill's line too).
+        $tuitionIds = array_map(static fn ($o) => (int) $o['id'], array_filter($obligations, static fn ($o) => ($o['fee_type_code'] ?? '') !== 'EXTRA_CHARGE'));
+        $waivedOn = [];
+        if ($tuitionIds) {
+            foreach ($this->db->query('SELECT student_fee_obligation_id, discount_value FROM fee_discounts_waivers
+                                        WHERE status = \'active\' AND student_fee_obligation_id IN (' . implode(',', $tuitionIds) . ')')->fetchAll(PDO::FETCH_ASSOC) as $w) {
+                $waivedOn[(int) $w['student_fee_obligation_id']] = ($waivedOn[(int) $w['student_fee_obligation_id']] ?? 0) + (float) $w['discount_value'];
+            }
+        }
+
         // Term-level paid/balance/waived from the ledger view
         $feeBalView = ReadReplicaService::qualifiedRef('student_fee_balances');
         $stmt = $this->db->prepare(
@@ -3445,7 +3456,10 @@ class ParentPortalManager extends BaseAPI
                     $rowPaid   = $isExtra
                         ? (float)($o['amount_paid'] ?? 0)
                         : ($schoolFeeDue > 0 ? round(max(0, $paid - $extraPaid) * ($amountDue / $schoolFeeDue), 2) : 0);
-                    $waived    = (float)($o['amount_waived'] ?? $o['sponsored_waiver_amount'] ?? 0);
+                    $waived    = $isExtra
+                        ? (float)($o['amount_waived'] ?? 0)
+                        : (float)($o['sponsored_waiver_amount'] ?? 0) + ($waivedOn[(int)$o['id']] ?? 0);
+                    $waived    = min($waived, $amountDue);
                     $rowBal    = max($amountDue - $waived - $rowPaid, 0);
 
                     $o['amount_paid'] = $rowPaid;
@@ -3479,6 +3493,9 @@ class ParentPortalManager extends BaseAPI
             }
             $yData['brought_forward'] = $statement['brought_forward'];
             $yData['summary'] = $statement['summary'];
+            // The same dated account statement the school prints: brought forward,
+            // fees, waivers, scholarships/sponsorships, credits and payments, with who.
+            $yData['ledger'] = $statement['ledger'];
             $byTerm = [];
             foreach ($statement['terms'] as $term) {
                 $byTerm[(string) $term['term']] = $term;

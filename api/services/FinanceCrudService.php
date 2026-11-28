@@ -80,11 +80,24 @@ final class FinanceCrudService
             $d['department_id'] ?? null, YearScope::legacyYear($this->db, $d), $d['term'] ?? null,
             $d['notes'] ?? null, $d['attachment_path'] ?? null, $userId,
         ]);
-        return ['id' => $this->db->lastInsertId(), 'expense_number' => $expNo];
+        $newId = (int) $this->db->lastInsertId();
+        // Link the draft to its department's budget line so the approver sees what is left.
+        if (empty($d['budget_line_item_id'])) {
+            $line = (new BudgetService($this->db))->lineFor(!empty($d['department_id']) ? (int) $d['department_id'] : null, !empty($d['category_id']) ? (int) $d['category_id'] : null, $d['expense_date'] ?? null);
+            if ($line) $this->db->prepare('UPDATE expenses SET budget_line_item_id=? WHERE id=?')->execute([$line['line_id'], $newId]);
+        }
+        return ['id' => $newId, 'expense_number' => $expNo];
     }
 
     public function updateExpense(int $id, array $data): void
     {
+        // An expense is changed only while it is a draft or was rejected; once
+        // submitted it holds budget money and the approver decides on it as it is.
+        $st = $this->db->prepare('SELECT status FROM expenses WHERE id=? AND deleted_at IS NULL');
+        $st->execute([$id]);
+        $current = $st->fetchColumn();
+        if ($current === false) throw new \RuntimeException('Expense not found.');
+        if (!in_array($current, ['draft', 'rejected'], true)) throw new \RuntimeException('A submitted, approved or paid expense cannot be edited. Cancel it and record a new one.');
         $fields = [];
         $params = [];
         $allowed = ['category_id','description','amount','expense_date','payment_method',
@@ -100,6 +113,31 @@ final class FinanceCrudService
 
     public function setExpenseStatus(int $id, string $status): void
     {
+        if ($status === 'pending_approval') {
+            // Submitting holds the amount on the department's budget line, so
+            // it must fit what is left (the same rule as the approval workflow).
+            $e = $this->db->prepare("SELECT id, amount, status, category_id, department_id, expense_date, budget_line_item_id FROM expenses WHERE id=? AND deleted_at IS NULL");
+            $e->execute([$id]);
+            $x = $e->fetch(\PDO::FETCH_ASSOC);
+            if (!$x) throw new \RuntimeException('Expense not found.');
+            if (!in_array($x['status'], ['draft', 'rejected'], true)) throw new \RuntimeException('Only a draft or rejected expense can be submitted.');
+            $budget = new BudgetService($this->db);
+            if (!$x['budget_line_item_id']) {
+                $line = $budget->lineFor($x['department_id'] ? (int) $x['department_id'] : null, $x['category_id'] ? (int) $x['category_id'] : null, $x['expense_date']);
+                if ($line) {
+                    $this->db->prepare('UPDATE expenses SET budget_line_item_id=? WHERE id=?')->execute([$line['line_id'], $id]);
+                    $x['budget_line_item_id'] = $line['line_id'];
+                }
+            }
+            if ($x['budget_line_item_id']) {
+                $l = $this->db->prepare('SELECT allocated_amount - spent_amount - committed_amount FROM budget_line_items WHERE id=?');
+                $l->execute([(int) $x['budget_line_item_id']]);
+                $left = (float) $l->fetchColumn();
+                if ((float) $x['amount'] > $left + 0.004) {
+                    throw new \RuntimeException(sprintf("This expense (KES %s) is more than is left on the department's budget line (KES %s). Ask for more funds on the line first.", number_format((float) $x['amount'], 2), number_format(max(0, $left), 2)));
+                }
+            }
+        }
         $this->db->prepare("UPDATE expenses SET status=?, updated_at=NOW() WHERE id=?")->execute([$status, $id]);
     }
 
@@ -799,21 +837,8 @@ final class FinanceCrudService
         try {
             $stmt = $this->db->prepare("UPDATE student_scholarship_awards SET status='revoked', revoked_by=?, revoked_at=NOW(), updated_at=NOW() WHERE id=? AND status='active'");
             $stmt->execute([$userId, $id]);
-            $this->db->prepare(
-                "UPDATE student_fee_obligations sfo
-                 JOIN student_academic_enrollments sae ON sae.id=sfo.student_academic_enrollment_id
-                 JOIN student_scholarship_awards ssa ON ssa.student_id=sae.student_id AND ssa.academic_year_id=sfo.academic_year_id
-                 JOIN academic_year_terms ayt ON ayt.id=sfo.academic_year_term_id
-                 SET sfo.is_sponsored=0, sfo.sponsored_waiver_amount=0,
-                     sfo.status=CASE
-                       WHEN COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.student_id=sae.student_id AND p.status='confirmed' AND p.payment_purpose='fees'),0) >= sfo.amount_due THEN 'paid'
-                       WHEN COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.student_id=sae.student_id AND p.status='confirmed' AND p.payment_purpose='fees'),0) > 0 THEN 'partial'
-                       ELSE 'pending' END,
-                     sfo.updated_at=NOW()
-                 WHERE ssa.id=? AND ssa.status='revoked'
-                   AND (ssa.starts_on IS NULL OR ayt.closing_date >= ssa.starts_on)
-                   AND (ssa.ends_on IS NULL OR ayt.opening_date <= ssa.ends_on)"
-            )->execute([$id]);
+            // Only this award's relief comes off; other relief on the same bills stays.
+            (new \App\API\Services\FeeReliefService($this->db))->revokeSource('scholarship', $id, $userId);
             $this->db->commit();
         } catch (\Throwable $e) {
             if ($this->db->inTransaction()) $this->db->rollBack();
@@ -823,36 +848,8 @@ final class FinanceCrudService
 
     private function applyScholarshipToObligations(int $awardId): void
     {
-        $stmt = $this->db->prepare("SELECT * FROM student_scholarship_awards WHERE id=? AND status='active'");
-        $stmt->execute([$awardId]);
-        $award = $stmt->fetch();
-        if (!$award) return;
-        $waiver = $this->db->prepare(
-             "UPDATE student_fee_obligations sfo
-             JOIN student_academic_enrollments sae ON sae.id=sfo.student_academic_enrollment_id
-             JOIN student_scholarship_awards ssa ON ssa.student_id=sae.student_id
-                 AND ssa.academic_year_id=sfo.academic_year_id AND ssa.id=?
-             JOIN academic_year_terms ayt ON ayt.id=sfo.academic_year_term_id
-                 SET sfo.is_sponsored=1,
-                 sfo.sponsored_waiver_amount=LEAST(sfo.amount_due, CASE
-                    WHEN ?='full' THEN sfo.amount_due
-                    WHEN ?='percentage' THEN sfo.amount_due * ? / 100
-                    ELSE ? END),
-                 sfo.status=CASE WHEN LEAST(sfo.amount_due, CASE
-                    WHEN ?='full' THEN sfo.amount_due
-                    WHEN ?='percentage' THEN sfo.amount_due * ? / 100
-                    ELSE ? END) >= sfo.amount_due THEN 'paid' ELSE sfo.status END,
-                 sfo.updated_at=NOW()
-             WHERE sae.student_id=? AND sfo.academic_year_id=? AND sfo.status <> 'paid'
-               AND (ssa.starts_on IS NULL OR ayt.closing_date >= ssa.starts_on)
-               AND (ssa.ends_on IS NULL OR ayt.opening_date <= ssa.ends_on)"
-        );
-        $waiver->execute([
-            $awardId,
-            $award['coverage_type'], $award['coverage_type'], (float)$award['coverage_percentage'], (float)$award['coverage_amount'],
-            $award['coverage_type'], $award['coverage_type'], (float)$award['coverage_percentage'], (float)$award['coverage_amount'],
-            (int)$award['student_id'], (int)$award['academic_year_id']
-        ]);
+        // One relief row per bill (who awarded it, when); bills already paid are left as they are.
+        (new \App\API\Services\FeeReliefService($this->db))->applyScholarshipAward($awardId, true);
     }
 
     // ==================== FEE CREDIT NOTES ====================

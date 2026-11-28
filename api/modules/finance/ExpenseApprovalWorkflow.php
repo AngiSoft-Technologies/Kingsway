@@ -79,15 +79,29 @@ class ExpenseApprovalWorkflow extends WorkflowHandler
                 return formatResponse(false, null, 'Active approval workflow already exists for this expense');
             }
 
-            // Validate against budget
+            // Validate against the department's budget line: link it if the
+            // expense has none yet, and refuse more than is left on it (a
+            // submitted expense holds its amount until decided).
             $budgetValidation = 'valid';
             $validationNotes = '';
-
-            if ($expense['budget_line_item_id']) {
-                if ($expense['amount'] > $expense['available_balance']) {
-                    $budgetValidation = 'exceeds_budget';
-                    $validationNotes = 'Expense exceeds available budget balance';
+            if (!$expense['budget_line_item_id']) {
+                $line = (new \App\API\Services\BudgetService($this->db))->lineFor(
+                    $expense['department_id'] ? (int) $expense['department_id'] : null,
+                    $expense['category_id'] ? (int) $expense['category_id'] : null,
+                    $expense['expense_date'] ?: date('Y-m-d')
+                );
+                if ($line) {
+                    $this->db->prepare('UPDATE expenses SET budget_line_item_id = ? WHERE id = ?')->execute([$line['line_id'], $expenseId]);
+                    $expense['budget_line_item_id'] = $line['line_id'];
+                    $expense['available_balance'] = $line['available'];
                 }
+            }
+            if ($expense['budget_line_item_id'] && (float) $expense['amount'] > (float) $expense['available_balance'] + 0.004) {
+                $this->db->rollBack();
+                return formatResponse(false, null, sprintf(
+                    'This expense (KES %s) is more than is left on the department\'s budget line (KES %s). Ask for more funds on the line first.',
+                    number_format((float) $expense['amount'], 2), number_format(max(0, (float) $expense['available_balance']), 2)
+                ));
             }
 
             // Create workflow instance
